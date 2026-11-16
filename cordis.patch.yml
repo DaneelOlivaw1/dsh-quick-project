@@ -1,0 +1,8 @@
+# dsh-quick-project — bundle patch.
+#
+# Mounts the plugin module from this package. There is no Host configuration:
+# every setting this plugin honours is the browser half's constant, and the
+# project root is the Host home's `project/` directory.
+- insert:
+    - id: quick-project
+      name: dsh-quick-project
