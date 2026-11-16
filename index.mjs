@@ -1,17 +1,19 @@
 /**
- * Host half of dsh-quick-project: deliberately empty.
+ * Main Host half of dsh-quick-project.
  *
- * Everything this plugin does happens in the browser half — the Host already
- * owns the two calls it needs (`directoryPicker.createDirectory` to make the
- * folder, `workspaces.create` to adopt it), and the flow's owner opens the
- * resulting Workspace. A Host module still has to exist because the bundle
- * patch mounts this package, so this file only names the plugin.
+ * Deliberately empty of behaviour. Everything the plugin does on the Host is one
+ * HTTP endpoint that lives in `host/name-route.mjs`, mounted as its own profile
+ * patch entry: Node caches an ESM module by URL for the life of the process, so
+ * a route defined here could only ever appear after a Host restart, while a
+ * module the process has never imported is picked up on recompose.
+ *
+ * The browser half is the plugin; this file only names it.
  */
 
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'quick-project'
 
-/** No Host services are read. */
+/** No Host services are read here. */
 export const inject = []
 
 /** Nothing to wire on the Host. */

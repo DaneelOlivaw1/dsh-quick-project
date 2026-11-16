@@ -1,19 +1,22 @@
 {
   "name": "dsh-quick-project",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "DeepSeek Harness bundle plugin: the sidebar's 「+」 becomes one text field — type a project name, the folder is created under ~/project and that Workspace opens. No folder-tree walk.",
   "type": "module",
   "main": "index.mjs",
   "exports": {
     ".": "./index.mjs",
     "./client": "./client/client.js",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./name-route": "./host/name-route.mjs"
   },
   "files": [
     "index.mjs",
+    "host/name-route.mjs",
     "client/client.js",
     "client/src/client.js",
     "scripts/build.mjs",
+    "test/host.test.mjs",
     "cordis.patch.yml",
     "README.md"
   ],
