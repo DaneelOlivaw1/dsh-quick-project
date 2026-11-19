@@ -21,7 +21,7 @@
 | 名字不满意 | 「项目名」那一栏随时可改，改了就不再被自动覆盖 |
 | 输入一个已存在的名字 | 提示「同名文件夹已存在，将直接打开」→ 打开它，需求照样发出 |
 | `Esc` / 点遮罩 / 取消 | 关闭，什么都不建 |
-| 「选择已有文件夹…」 | 退回宿主原生目录选择器（不丢失原来的选择能力） |
+| 「选择已有文件夹…」 | 打开应用内目录浏览（面包屑 + 子目录列表），选中即可用；不依赖宿主的原生选择器 |
 
 `Shift+回车` 换行。名称必须是单个路径段：不能为空，不能含 `/` 或 `\`。
 
@@ -30,6 +30,8 @@
 1. **取名**：宿主侧 `host/name-route.mjs`，`POST /quick-project/name`。用默认模型路由（`agentDefaultModel`）问一句，只取名字：答案里优先抓反引号/引号内的候选，再按「连字符数 + 长度」打分，所以模型回一句 "Here you go: `invoice-reconciler`" 也只会得到 `invoice-reconciler`。中文答案会给一个短中文名。模型挂了/路由不通时回 `ok:false`，浏览器侧用本地兜底名，项目照建不误。
 2. **建目录 + 开工作区**：浏览器侧。`directoryPicker.createDirectory` 建目录，工作区的登记与打开交给目录流的所有者（`onPicked`）。
 3. **把需求发出去**：`startSession(workspaceId, { prompt })` 只**填草稿**不发；`AutoSendGuard` 挂在 `conversation.input.left`，等它自己那个会话的草稿变成刚写进去的文字，再 `inputActions.submit()` 一次。
+
+「选择已有文件夹…」走的是 `listDirectory`（`browse` 能力），**不用** `directoryPicker.pick`：后者需要宿主的 `native` 能力，而用应用内选择器组装的部署只提供 `browse`，调过去会直接报 “needs the native capability”。
 
 ## 它接管了什么
 

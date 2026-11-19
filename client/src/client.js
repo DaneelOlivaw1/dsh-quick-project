@@ -47,6 +47,12 @@ const LABELS = {
     sending: '正在发送需求…',
     cancel: '取消',
     browse: '选择已有文件夹…',
+    'browse.title': '选择已有文件夹',
+    'browse.here': '用这个文件夹',
+    'browse.back': '返回新建',
+    'browse.empty': '这里没有子文件夹',
+    'browse.loading': '读取中…',
+    'browse.failed': '打不开这个目录：{message}',
     exists: '同名文件夹已存在，将直接打开',
     'error.name': '还需要一个项目名（或写点需求自动取）',
     'error.invalid': '名称不能为空，也不能包含 “/” 或 “\\”',
@@ -70,6 +76,12 @@ const LABELS = {
     sending: 'Sending the requirement…',
     cancel: 'Cancel',
     browse: 'Choose an existing folder…',
+    'browse.title': 'Choose an existing folder',
+    'browse.here': 'Use this folder',
+    'browse.back': 'Back',
+    'browse.empty': 'No subfolders here',
+    'browse.loading': 'Loading…',
+    'browse.failed': 'Could not open this folder: {message}',
     exists: 'That folder already exists; it will be opened',
     'error.name': 'A name is needed — or describe the project and it is named for you',
     'error.invalid': 'A name is required and may not contain “/” or “\\”',
@@ -198,6 +210,58 @@ const FOOT = {
   color: 'var(--dsw-alias-label-caption, rgba(0,0,0,.4))',
 }
 
+const CRUMBS = {
+  display: 'flex',
+  flexWrap: 'wrap',
+  alignItems: 'center',
+  gap: '2px',
+  fontSize: '12px',
+  lineHeight: '18px',
+}
+
+const CRUMB = {
+  maxWidth: '160px',
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  whiteSpace: 'nowrap',
+  padding: '1px 4px',
+  fontSize: '12px',
+  lineHeight: '18px',
+  color: 'var(--dsw-alias-label-tertiary, rgba(0,0,0,.55))',
+  background: 'transparent',
+  border: 'none',
+  borderRadius: '4px',
+  cursor: 'pointer',
+}
+
+const ENTRY_LIST = {
+  display: 'flex',
+  flexDirection: 'column',
+  gap: '1px',
+  maxHeight: '230px',
+  overflowY: 'auto',
+  padding: '2px',
+  border: '0.5px solid var(--dsw-alias-border-l3, rgba(0,0,0,.12))',
+  borderRadius: '8px',
+}
+
+const ENTRY = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: '6px',
+  width: '100%',
+  height: '28px',
+  padding: '0 8px',
+  fontSize: '13px',
+  lineHeight: '20px',
+  color: 'inherit',
+  textAlign: 'left',
+  background: 'transparent',
+  border: 'none',
+  borderRadius: '6px',
+  cursor: 'pointer',
+}
+
 /**
  * The requirement waiting to be sent once its draft lands. Module scope because
  * the two halves live in different components: the dialog sets it, the guard —
@@ -258,7 +322,7 @@ function fallbackName(description) {
 function QuickProjectFlow(props) {
   const {
     open, busy, onPicked, onCancel,
-    createDirectory, listDirectory, pickDirectory, hostHome,
+    createDirectory, listDirectory, readDirectory, hostHome,
     nameFromRequirement, waitForWorkspace, startSession, t,
   } = props
   const [description, setDescription] = useState('')
@@ -269,6 +333,11 @@ function QuickProjectFlow(props) {
   const [error, setError] = useState(undefined)
   const [working, setWorking] = useState(false)
   const [existed, setExisted] = useState(false)
+  /** `browse` is the fallback that picks an existing folder without the native dialog. */
+  const [mode, setMode] = useState('create')
+  const [listing, setListing] = useState(undefined)
+  const [listingError, setListingError] = useState(undefined)
+  const [listingBusy, setListingBusy] = useState(false)
   const descriptionRef = useRef(null)
   /** The in-flight naming request, so Enter can wait for it instead of failing. */
   const namingRef = useRef(undefined)
@@ -291,6 +360,10 @@ function QuickProjectFlow(props) {
     setError(undefined)
     setWorking(false)
     setExisted(false)
+    setMode('create')
+    setListing(undefined)
+    setListingError(undefined)
+    setListingBusy(false)
     const focus = setTimeout(() => descriptionRef.current?.focus(), 30)
     return () => clearTimeout(focus)
   }, [open])
@@ -358,6 +431,32 @@ function QuickProjectFlow(props) {
     }
   }, [open, root, trimmedName, listDirectory])
 
+  /**
+   * Adopt one directory and start the Session with the requirement in it.
+   * @param path - absolute directory the flow was pointed at.
+   */
+  const finishWith = useCallback(async (path) => {
+    if (trimmedDescription !== '') {
+      AUTO_SEND.text = trimmedDescription
+      AUTO_SEND.deadline = Date.now() + AUTO_SEND_WINDOW_MS
+    }
+    onPicked(path)
+    if (trimmedDescription === '') return
+    const workspaceId = await waitForWorkspace(path)
+    if (workspaceId === undefined) return
+    AUTO_SEND.sessionId = workspaceId
+    // The flow's owner is opening a blank Session here too. Two concurrent
+    // `startSession` calls for one Workspace collapse into one attempt, and the
+    // loser's `beforeOpen` — which carries the requirement — is dropped with it.
+    // Adopting a blank that already exists therefore gets a second try once the
+    // first attempt has settled.
+    await startSession(workspaceId, { prompt: trimmedDescription, clearPreviousDraft: true })
+    await new Promise((resolve) => setTimeout(resolve, 700))
+    if (AUTO_SEND.text !== '') {
+      await startSession(workspaceId, { prompt: trimmedDescription, clearPreviousDraft: true })
+    }
+  }, [trimmedDescription, onPicked, waitForWorkspace, startSession])
+
   const submit = useCallback(async () => {
     if (working || busy === true) return
     // Pressing Enter while the model is still naming is not an error: wait for
@@ -396,40 +495,38 @@ function QuickProjectFlow(props) {
         AUTO_SEND.text = trimmedDescription
         AUTO_SEND.deadline = Date.now() + AUTO_SEND_WINDOW_MS
       }
-      onPicked(target)
-      if (trimmedDescription !== '') {
-        const workspaceId = await waitForWorkspace(target)
-        if (workspaceId !== undefined) {
-          AUTO_SEND.sessionId = workspaceId
-          // The flow's owner is opening a blank Session here too. Two concurrent
-          // `startSession` calls for one Workspace collapse into one attempt, and
-          // the loser's `beforeOpen` — which carries the requirement — is
-          // dropped with it. Adopting a blank that already exists therefore gets
-          // a second try once the first attempt has settled.
-          await startSession(workspaceId, { prompt: trimmedDescription, clearPreviousDraft: true })
-          await new Promise((resolve) => setTimeout(resolve, 700))
-          if (AUTO_SEND.text !== '') {
-            await startSession(workspaceId, { prompt: trimmedDescription, clearPreviousDraft: true })
-          }
-        }
-      }
+      await finishWith(target)
     } catch (reason) {
       AUTO_SEND.text = ''
       setError(t('error.failed', { message: reason instanceof Error ? reason.message : String(reason) }))
     } finally {
       setWorking(false)
     }
-  }, [working, busy, trimmedName, trimmedDescription, root, existed, createDirectory, onPicked, waitForWorkspace, startSession, t])
+  }, [working, busy, trimmedName, trimmedDescription, root, existed, createDirectory, finishWith, t])
+
+  /** Read one directory into the browser pane. */
+  const load = useCallback(async (path) => {
+    if (typeof path !== 'string' || path === '') {
+      setListingError(t('error.home'))
+      return
+    }
+    setListingBusy(true)
+    setListingError(undefined)
+    try {
+      setListing(await readDirectory(path))
+    } catch (reason) {
+      setListingError(t('browse.failed', { message: reason instanceof Error ? reason.message : String(reason) }))
+    } finally {
+      setListingBusy(false)
+    }
+  }, [readDirectory, t])
 
   const choose = useCallback(async () => {
     if (working || busy === true) return
-    try {
-      const picked = await pickDirectory()
-      if (typeof picked === 'string' && picked !== '') onPicked(picked)
-    } catch (reason) {
-      setError(t('error.failed', { message: reason instanceof Error ? reason.message : String(reason) }))
-    }
-  }, [working, busy, pickDirectory, onPicked, t])
+    setMode('browse')
+    setError(undefined)
+    await load(root ?? home ?? '')
+  }, [working, busy, root, home, load])
 
   if (!open) return null
 
@@ -454,75 +551,154 @@ function QuickProjectFlow(props) {
         if (event.target === event.currentTarget && !pending) onCancel()
       }}
     >
-      <div style={CARD} role="dialog" aria-modal="true" aria-label={t('title')}>
-        <div style={TITLE}>{t('title')}</div>
-        <div style={SUBTITLE}>{root === undefined ? t('subtitle.unknown') : t('subtitle.empty')}</div>
-        <textarea
-          ref={descriptionRef}
-          style={{ ...FIELD, minHeight: '64px' }}
-          rows={3}
-          value={description}
-          placeholder={t('description')}
-          spellCheck={false}
-          disabled={pending}
-          onChange={(event) => {
-            setDescription(event.target.value)
-            setError(undefined)
-          }}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter' && !event.shiftKey) {
-              event.preventDefault()
-              submit()
-            } else if (event.key === 'Escape') {
-              event.preventDefault()
-              onCancel()
-            }
-          }}
-        />
-        <div style={NAME_ROW}>
-          <span style={NAME_LABEL}>{t('nameLabel')}</span>
-          <input
-            style={NAME_INPUT}
-            value={name}
-            placeholder={t('namePlaceholder')}
-            spellCheck={false}
-            autoComplete="off"
-            disabled={pending}
-            onChange={(event) => {
-              setName(event.target.value)
-              setNameTouched(true)
-              setNameNote(undefined)
-              setError(undefined)
-            }}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter') {
-                event.preventDefault()
-                submit()
-              } else if (event.key === 'Escape') {
-                event.preventDefault()
-                onCancel()
-              }
-            }}
-          />
-        </div>
-        {status !== undefined && (
-          <div style={{ ...PREVIEW, fontFamily: 'inherit', color: status.color }} role={error === undefined ? 'status' : 'alert'}>
-            {status.text}
-          </div>
+      <div style={CARD} role="dialog" aria-modal="true" aria-label={mode === 'browse' ? t('browse.title') : t('title')}>
+        <div style={TITLE}>{mode === 'browse' ? t('browse.title') : t('title')}</div>
+        {mode === 'browse' ? (
+          <>
+            <div style={CRUMBS}>
+              {(listing?.crumbs ?? []).map((crumb, index, all) => (
+                <button
+                  key={crumb.path}
+                  type="button"
+                  style={CRUMB}
+                  title={crumb.path}
+                  disabled={pending}
+                  onClick={() => load(crumb.path)}
+                >
+                  {crumb.name}
+                  {index < all.length - 1 && <span style={{ opacity: 0.5 }}> /</span>}
+                </button>
+              ))}
+            </div>
+            <div style={ENTRY_LIST}>
+              {listingBusy ? (
+                <div style={{ ...PREVIEW, fontFamily: 'inherit', padding: '6px 8px' }} role="status">{t('browse.loading')}</div>
+              ) : listingError !== undefined ? (
+                <div style={{ ...PREVIEW, fontFamily: 'inherit', padding: '6px 8px', color: 'var(--dsw-alias-state-error-primary, #d1242f)' }} role="alert">
+                  {listingError}
+                </div>
+              ) : (listing?.entries ?? []).length === 0 ? (
+                <div style={{ ...PREVIEW, fontFamily: 'inherit', padding: '6px 8px' }}>{t('browse.empty')}</div>
+              ) : (
+                (listing?.entries ?? []).map((entry) => (
+                  <button
+                    key={entry.path}
+                    type="button"
+                    style={ENTRY}
+                    title={entry.path}
+                    disabled={pending}
+                    onClick={() => load(entry.path)}
+                    onMouseEnter={(event) => { event.currentTarget.style.background = 'var(--dsw-alias-interactive-bg-hover, rgba(0,0,0,.05))' }}
+                    onMouseLeave={(event) => { event.currentTarget.style.background = 'transparent' }}
+                  >
+                    <span aria-hidden="true">▸</span>
+                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{entry.name}</span>
+                  </button>
+                ))
+              )}
+            </div>
+            <div style={PREVIEW} title={listing?.path}>{listing?.path ?? ''}</div>
+            <div style={ACTIONS}>
+              <button type="button" style={LINK} disabled={pending} onClick={() => setMode('create')}>
+                {t('browse.back')}
+              </button>
+              <span style={{ flex: '1 1 0' }} />
+              <button type="button" style={SECONDARY} disabled={working} onClick={onCancel}>
+                {t('cancel')}
+              </button>
+              <button
+                type="button"
+                style={PRIMARY}
+                disabled={pending || listing === undefined}
+                onClick={async () => {
+                  if (listing === undefined) return
+                  setWorking(true)
+                  setError(undefined)
+                  try {
+                    await finishWith(listing.path)
+                  } catch (reason) {
+                    setError(t('error.failed', { message: reason instanceof Error ? reason.message : String(reason) }))
+                    setMode('create')
+                  } finally {
+                    setWorking(false)
+                  }
+                }}
+              >
+                {busy === true ? t('opening') : working ? t('creating') : t('browse.here')}
+              </button>
+            </div>
+          </>
+        ) : (
+          <>
+            <div style={SUBTITLE}>{root === undefined ? t('subtitle.unknown') : t('subtitle.empty')}</div>
+            <textarea
+              ref={descriptionRef}
+              style={{ ...FIELD, minHeight: '64px' }}
+              rows={3}
+              value={description}
+              placeholder={t('description')}
+              spellCheck={false}
+              disabled={pending}
+              onChange={(event) => {
+                setDescription(event.target.value)
+                setError(undefined)
+              }}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' && !event.shiftKey) {
+                  event.preventDefault()
+                  submit()
+                } else if (event.key === 'Escape') {
+                  event.preventDefault()
+                  onCancel()
+                }
+              }}
+            />
+            <div style={NAME_ROW}>
+              <span style={NAME_LABEL}>{t('nameLabel')}</span>
+              <input
+                style={NAME_INPUT}
+                value={name}
+                placeholder={t('namePlaceholder')}
+                spellCheck={false}
+                autoComplete="off"
+                disabled={pending}
+                onChange={(event) => {
+                  setName(event.target.value)
+                  setNameTouched(true)
+                  setNameNote(undefined)
+                  setError(undefined)
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault()
+                    submit()
+                  } else if (event.key === 'Escape') {
+                    event.preventDefault()
+                    onCancel()
+                  }
+                }}
+              />
+            </div>
+            {status !== undefined && (
+              <div style={{ ...PREVIEW, fontFamily: 'inherit', color: status.color }} role={error === undefined ? 'status' : 'alert'}>
+                {status.text}
+              </div>
+            )}
+            <div style={ACTIONS}>
+              <button type="button" style={LINK} disabled={pending} onClick={choose}>
+                {t('browse')}
+              </button>
+              <span style={{ flex: '1 1 0' }} />
+              <button type="button" style={SECONDARY} disabled={working} onClick={onCancel}>
+                {t('cancel')}
+              </button>
+              <button type="button" style={PRIMARY} disabled={pending || trimmedName === ''} onClick={submit}>
+                {busy === true ? t('opening') : working ? t('creating') : t('create')}
+              </button>
+            </div>
+            <div style={FOOT}>{t('foot')}</div>
+          </>
         )}
-        <div style={ACTIONS}>
-          <button type="button" style={LINK} disabled={pending} onClick={choose}>
-            {t('browse')}
-          </button>
-          <span style={{ flex: '1 1 0' }} />
-          <button type="button" style={SECONDARY} disabled={working} onClick={onCancel}>
-            {t('cancel')}
-          </button>
-          <button type="button" style={PRIMARY} disabled={pending || trimmedName === ''} onClick={submit}>
-            {busy === true ? t('opening') : working ? t('creating') : t('create')}
-          </button>
-        </div>
-        <div style={FOOT}>{t('foot')}</div>
       </div>
     </div>
   )
@@ -568,7 +744,10 @@ export function apply(ctx) {
   const injected = () => ({
     createDirectory: (path, name) => ctx.uiWorkspace.createDirectory(path, name),
     listDirectory: (path, signal) => ctx.uiWorkspace.listDirectory(path, signal),
-    pickDirectory: () => ctx.uiWorkspace.pickDirectory(),
+    // `directoryPicker.pick` needs the Host's *native* capability. Deployments
+    // composed with the in-app browser serve `browse` instead, so the fallback
+    // walks `listDirectory` itself rather than assuming a native dialog exists.
+    readDirectory: (path, signal) => ctx.uiWorkspace.listDirectory(path, signal),
     hostHome: () => ctx.remote.$host.home,
     startSession: (workspaceId, options) => ctx.uiWorkspace.startSession(workspaceId, options),
     /**
