@@ -795,6 +795,9 @@ export function apply(ctx) {
     resolve: (target) => [{
       id: 'remove',
       label: t('menu.remove'),
+      // Reuse the trash glyph the built-in delete row already registered under
+      // this key, so the two destructive rows look like siblings.
+      icon: { key: 'workspace.delete' },
       danger: true,
       separatorBefore: true,
       failureLabel: t('remove.failed.short'),
