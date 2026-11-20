@@ -53,6 +53,9 @@ const LABELS = {
     'browse.empty': '这里没有子文件夹',
     'browse.loading': '读取中…',
     'browse.failed': '打不开这个目录：{message}',
+    'menu.remove': '删除项目（含文件夹）',
+    'remove.confirm': '删除「{name}」，连文件夹一起删掉？\n\n{path}\n\n文件夹会被永久删除，无法撤销。',
+    'remove.failed.short': '文件夹没能删掉',
     exists: '同名文件夹已存在，将直接打开',
     'error.name': '还需要一个项目名（或写点需求自动取）',
     'error.invalid': '名称不能为空，也不能包含 “/” 或 “\\”',
@@ -82,6 +85,9 @@ const LABELS = {
     'browse.empty': 'No subfolders here',
     'browse.loading': 'Loading…',
     'browse.failed': 'Could not open this folder: {message}',
+    'menu.remove': 'Delete project and folder',
+    'remove.confirm': 'Delete “{name}” and its folder?\n\n{path}\n\nThe folder is removed for good; this cannot be undone.',
+    'remove.failed.short': 'The folder could not be removed',
     exists: 'That folder already exists; it will be opened',
     'error.name': 'A name is needed — or describe the project and it is named for you',
     'error.invalid': 'A name is required and may not contain “/” or “\\”',
@@ -92,7 +98,7 @@ const LABELS = {
 }
 
 /** Services this client plugin reads; Cordis throws on un-injected access. */
-export const inject = ['slots', 'locale', 'uiWorkspace', 'workspaces', 'remote']
+export const inject = ['slots', 'locale', 'uiWorkspace', 'workspaces', 'remote', 'contextMenus']
 
 const OVERLAY = {
   position: 'fixed',
@@ -276,6 +282,19 @@ const AUTO_SEND_WINDOW_MS = 20_000
 function joinPath(parent, name) {
   const base = parent.endsWith('/') ? parent.slice(0, -1) : parent
   return `${base}/${name}`
+}
+
+/**
+ * True when this Enter belongs to an IME rather than to the user.
+ *
+ * Committing a CJK candidate with Enter also fires `keydown`, and treating that
+ * as "submit" creates a project nobody confirmed — which is exactly the mistake
+ * this dialog is supposed to make impossible.
+ * @param event - the keydown event.
+ * @returns whether the event is part of a composition session.
+ */
+function isImeEnter(event) {
+  return event.isComposing === true || event.keyCode === 229
 }
 
 /** A name is one path segment: no separators, not blank, not a dot entry. */
@@ -645,6 +664,7 @@ function QuickProjectFlow(props) {
               }}
               onKeyDown={(event) => {
                 if (event.key === 'Enter' && !event.shiftKey) {
+                  if (isImeEnter(event)) return
                   event.preventDefault()
                   submit()
                 } else if (event.key === 'Escape') {
@@ -670,6 +690,7 @@ function QuickProjectFlow(props) {
                 }}
                 onKeyDown={(event) => {
                   if (event.key === 'Enter') {
+                    if (isImeEnter(event)) return
                     event.preventDefault()
                     submit()
                   } else if (event.key === 'Escape') {
@@ -740,6 +761,46 @@ function AutoSendGuard(props) {
  */
 export function apply(ctx) {
   ctx.effect(() => ctx.locale.register(NS, LABELS), 'quick-project: dictionaries')
+  const t = ctx.locale.bind(NS)
+
+  /**
+   * Unregister the Workspace, then delete its directory.
+   *
+   * Unregistering first is deliberate: the row stops pointing at a directory
+   * that is about to disappear, so a failed delete leaves a visible error
+   * instead of a Workspace that opens into nothing.
+   * @param target - the clicked Workspace (id, path, display name).
+   */
+  const removeProject = async ({ workspaceId, path, displayTitle }) => {
+    if (typeof path !== 'string' || path === '') throw new Error('this Workspace has no directory path')
+    if (!window.confirm(t('remove.confirm', { name: displayTitle ?? path, path }))) return
+    await ctx.workspaces.delete(workspaceId)
+    const response = await fetch('/quick-project/remove', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ path }),
+    })
+    const body = await response.json().catch(() => undefined)
+    if (body?.ok !== true) {
+      throw new Error(body?.message ?? body?.error ?? `the Host answered ${response.status}`)
+    }
+  }
+
+  // 「删除工作区」 only unregisters the Workspace and leaves the folder on disk.
+  // This adds the missing half, in the same menu, next to it.
+  ctx.effect(() => ctx.contextMenus.register({
+    id: 'quick-project.remove',
+    target: 'workspace',
+    order: 350,
+    resolve: (target) => [{
+      id: 'remove',
+      label: t('menu.remove'),
+      danger: true,
+      separatorBefore: true,
+      failureLabel: t('remove.failed.short'),
+      run: () => removeProject(target),
+    }],
+  }), 'quick-project: delete-with-folder menu action')
 
   const injected = () => ({
     createDirectory: (path, name) => ctx.uiWorkspace.createDirectory(path, name),

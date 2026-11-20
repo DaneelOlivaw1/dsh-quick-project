@@ -13,10 +13,12 @@
   "files": [
     "index.mjs",
     "host/name-route.mjs",
+    "host/remove-route.mjs",
     "client/client.js",
     "client/src/client.js",
     "scripts/build.mjs",
     "test/host.test.mjs",
+    "test/remove.test.mjs",
     "cordis.patch.yml",
     "README.md"
   ],
@@ -34,7 +36,8 @@
     "node": ">=22"
   },
   "scripts": {
-    "build": "node scripts/build.mjs"
+    "build": "node scripts/build.mjs",
+    "test": "node --test test/host.test.mjs test/remove.test.mjs"
   },
   "dsh": {
     "bundle": {

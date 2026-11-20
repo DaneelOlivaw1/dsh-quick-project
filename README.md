@@ -22,6 +22,7 @@
 | 输入一个已存在的名字 | 提示「同名文件夹已存在，将直接打开」→ 打开它，需求照样发出 |
 | `Esc` / 点遮罩 / 取消 | 关闭，什么都不建 |
 | 「选择已有文件夹…」 | 打开应用内目录浏览（面包屑 + 子目录列表），选中即可用；不依赖宿主的原生选择器 |
+| 工作区右键 →「删除项目（含文件夹）」 | 确认后**连磁盘目录一起删**；原来的「删除工作区」只注销登记、留目录 |
 
 `Shift+回车` 换行。名称必须是单个路径段：不能为空，不能含 `/` 或 `\`。
 
@@ -32,6 +33,22 @@
 3. **把需求发出去**：`startSession(workspaceId, { prompt })` 只**填草稿**不发；`AutoSendGuard` 挂在 `conversation.input.left`，等它自己那个会话的草稿变成刚写进去的文字，再 `inputActions.submit()` 一次。
 
 「选择已有文件夹…」走的是 `listDirectory`（`browse` 能力），**不用** `directoryPicker.pick`：后者需要宿主的 `native` 能力，而用应用内选择器组装的部署只提供 `browse`，调过去会直接报 “needs the native capability”。
+
+## 删掉建错的项目
+
+Harness 自带的「删除工作区」只注销登记，文件夹留在磁盘上——建错了就没有下文了。所以工作区右键菜单里多一项**「删除项目（含文件夹）」**：确认框里写明名字和完整路径，确认后先注销工作区、再 `POST /quick-project/remove` 递归删目录。
+
+删除端点的护栏（都在 `host/remove-route.mjs`，有测试）：
+
+- 只删宿主 home 之内的路径；
+- 不删 home 本身、不删 `/`；
+- 不删项目根 `~/project`（一次点错不该清空所有项目）；
+- 不删 `~/.dsh` 里面任何东西（会话就在那儿）；
+- 必须是已存在的目录，符号链接按真实落点判断。
+
+## 回车不会误建
+
+输入法选词时按的回车也会触发 `keydown`，被当成「提交」就会建出一个没人确认过的项目。描述框和名字框都跳过了组词状态的回车（`isComposing` / `keyCode 229`）。
 
 ## 它接管了什么
 
@@ -49,16 +66,18 @@ auto 取名还需要把宿主的取名路由挂上。它单独成模块，是因
 - insert:
     - id: quick-project-name
       name: file:///Users/daneel/project/dsh-quick-project/host/name-route.mjs?v=1
+    - id: quick-project-remove
+      name: file:///Users/daneel/project/dsh-quick-project/host/remove-route.mjs?v=1
 ```
 
-`?v=1` 是给宿主内部用的版本号：改了 `host/name-route.mjs` 之后把它 +1，再用插件管理器的「禁用→启用」切一次 `quick-project-name`，新代码就会被导入（不 +1 会命中 ESM 缓存，跑的还是旧逻辑）。
+`?v=1` 是给宿主内部用的版本号：改了对应的 `host/*.mjs` 之后把它 +1，再用插件管理器的「禁用→启用」切一次同名条目，新代码就会被导入（不 +1 会命中 ESM 缓存，跑的还是旧逻辑）。新增一个 `host/` 文件则是全新的 URL，直接加条目即可，无需 +1。
 
 ## 开发
 
 ```bash
 node scripts/build.mjs                          # 重建 client/client.js
 DSH_QUICK_PROJECT_DEBUG=1 node scripts/build.mjs # 不压缩
-node --test test/host.test.mjs                  # 宿主侧：取名路由的契约
+npm test                                        # 宿主侧：取名路由 + 删除路由的契约
 ```
 
 改 `client/src/client.js` 后必须重建：宿主下发的是 `client/client.js` 这个打包产物。React 保持外置（loader 的 require 表持有它，打进包里会出现第二份副本并破坏 hooks）。
