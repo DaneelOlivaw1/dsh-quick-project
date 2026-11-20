@@ -43,6 +43,7 @@ const LABELS = {
     naming: '正在取名…',
     named: '已按需求取名，可改',
     'named.fallback': '模型没取名，用了备用名，可改',
+    'name.will': '点「创建并开始」时按需求取名',
     opening: '正在打开…',
     sending: '正在发送需求…',
     cancel: '取消',
@@ -75,6 +76,7 @@ const LABELS = {
     naming: 'Naming…',
     named: 'Named from the description — editable',
     'named.fallback': 'The model did not name it; using a fallback — editable',
+    'name.will': 'Named from the description when you start it',
     opening: 'Opening…',
     sending: 'Sending the requirement…',
     cancel: 'Cancel',
@@ -358,15 +360,13 @@ function QuickProjectFlow(props) {
   const [listingError, setListingError] = useState(undefined)
   const [listingBusy, setListingBusy] = useState(false)
   const descriptionRef = useRef(null)
-  /** The in-flight naming request, so Enter can wait for it instead of failing. */
-  const namingRef = useRef(undefined)
 
   const home = hostHome()
   const root = home === undefined || home === '' ? undefined : joinPath(home, 'project')
   const trimmedName = name.trim()
   const trimmedDescription = description.trim()
   const preview = root === undefined ? `~/project/${trimmedName}` : trimmedName === '' ? root : joinPath(root, trimmedName)
-  const pending = working || busy === true
+  const pending = working || busy === true || naming
 
   // A fresh dialog each time it opens: no stale text, no stale complaint.
   useEffect(() => {
@@ -386,44 +386,6 @@ function QuickProjectFlow(props) {
     const focus = setTimeout(() => descriptionRef.current?.focus(), 30)
     return () => clearTimeout(focus)
   }, [open])
-
-  // Ask the Host to name the project once the description settles. `nameTouched`
-  // guards the overwrite: a name the user typed is theirs, not a suggestion.
-  useEffect(() => {
-    if (!open || nameTouched || trimmedDescription === '') {
-      setNaming(false)
-      return
-    }
-    let cancelled = false
-    setNaming(true)
-    const ask = setTimeout(() => {
-      const request = nameFromRequirement(trimmedDescription)
-      namingRef.current = request.catch(() => undefined)
-      request
-        .then((suggested) => {
-          if (cancelled) return
-          const fallback = suggested === undefined
-          const value = fallback ? fallbackName(trimmedDescription) : suggested
-          setName(value)
-          setNameNote(fallback ? t('named.fallback') : t('named'))
-        })
-        .catch(() => {
-          if (cancelled) return
-          setName(fallbackName(trimmedDescription))
-          setNameNote(t('named.fallback'))
-        })
-        .finally(() => {
-          if (!cancelled) {
-            setNaming(false)
-            namingRef.current = undefined
-          }
-        })
-    }, 450)
-    return () => {
-      cancelled = true
-      clearTimeout(ask)
-    }
-  }, [open, trimmedDescription, nameTouched, nameFromRequirement, t])
 
   // Say “this one already exists” while typing rather than after Enter: the
   // answer changes what the button will do, so it belongs next to the field.
@@ -477,15 +439,23 @@ function QuickProjectFlow(props) {
   }, [trimmedDescription, onPicked, waitForWorkspace, startSession])
 
   const submit = useCallback(async () => {
-    if (working || busy === true) return
-    // Pressing Enter while the model is still naming is not an error: wait for
-    // the name it is about to hand back.
+    if (working || busy === true || naming) return
+    // Naming happens here and only here: typing the description must not start a
+    // model call, because a name that changes under your eyes reads as work you
+    // did not ask for yet.
     let resolved = trimmedName
-    if (resolved === '' && namingRef.current !== undefined) {
-      const suggested = await namingRef.current
-      resolved = typeof suggested === 'string' && suggested !== '' ? suggested : fallbackName(trimmedDescription)
-      setName(resolved)
-      setNameNote(t('named'))
+    if (resolved === '' && trimmedDescription !== '') {
+      setNaming(true)
+      setNameNote(undefined)
+      try {
+        const suggested = await nameFromRequirement(trimmedDescription)
+        const fallback = typeof suggested !== 'string' || suggested === ''
+        resolved = fallback ? fallbackName(trimmedDescription) : suggested
+        setName(resolved)
+        setNameNote(fallback ? t('named.fallback') : t('named'))
+      } finally {
+        setNaming(false)
+      }
     }
     if (invalidName(resolved)) {
       setError(resolved === '' ? t('error.name') : t('error.invalid'))
@@ -521,7 +491,7 @@ function QuickProjectFlow(props) {
     } finally {
       setWorking(false)
     }
-  }, [working, busy, trimmedName, trimmedDescription, root, existed, createDirectory, finishWith, t])
+  }, [working, busy, trimmedName, trimmedDescription, root, existed, createDirectory, finishWith, nameFromRequirement, t])
 
   /** Read one directory into the browser pane. */
   const load = useCallback(async (path) => {
@@ -561,7 +531,9 @@ function QuickProjectFlow(props) {
             ? { text: t('exists'), color: 'var(--dsw-alias-label-secondary, rgba(0,0,0,.7))' }
             : nameNote !== undefined
               ? { text: nameNote, color: 'var(--dsw-alias-label-tertiary, rgba(0,0,0,.55))' }
-              : { text: preview, color: 'var(--dsw-alias-label-secondary, rgba(0,0,0,.7))' }
+              : trimmedName === '' && trimmedDescription !== ''
+                ? { text: t('name.will'), color: 'var(--dsw-alias-label-tertiary, rgba(0,0,0,.55))' }
+                : { text: preview, color: 'var(--dsw-alias-label-secondary, rgba(0,0,0,.7))' }
 
   return (
     <div
@@ -713,7 +685,7 @@ function QuickProjectFlow(props) {
               <button type="button" style={SECONDARY} disabled={working} onClick={onCancel}>
                 {t('cancel')}
               </button>
-              <button type="button" style={PRIMARY} disabled={pending || trimmedName === ''} onClick={submit}>
+              <button type="button" style={PRIMARY} disabled={pending || (trimmedName === '' && trimmedDescription === '')} onClick={submit}>
                 {busy === true ? t('opening') : working ? t('creating') : t('create')}
               </button>
             </div>
