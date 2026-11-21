@@ -15,7 +15,7 @@ import { randomUUID } from 'node:crypto'
 export const name = 'quick-project-name'
 
 /** The model route and the HTTP surface are the only Host services read. */
-export const inject = ['llm', 'agentDefaultModel']
+export const inject = ['webServer', 'llm', 'agentDefaultModel']
 
 /** Folder names this endpoint is willing to return: one safe path segment. */
 const SLUG = /^[a-z0-9][a-z0-9-]{0,39}$/
@@ -23,10 +23,12 @@ const SLUG = /^[a-z0-9][a-z0-9-]{0,39}$/
 /** One-shot instruction for the naming call. */
 const SYSTEM = [
   'You name software projects.',
-  'Given a requirement description, return a short project folder name.',
-  'Rules: 2 to 4 English words, lowercase, ASCII letters digits and hyphens only,',
+  'The user writes in any language; the name you return is always ASCII.',
+  'Rules: 2 to 4 English words, lowercase, letters digits and hyphens only,',
   'kebab-case, at most 40 characters, no trailing hyphen.',
+  'Translate the idea, do not transliterate it: 快递单批量打印 → waybill-batch-printer.',
   'Answer with the name alone: no quotes, no punctuation around it, no explanation.',
+  'Never answer in Chinese or any other non-Latin script.',
 ].join('\n')
 
 /** Hard stop on the model call. */
@@ -162,8 +164,24 @@ async function suggestName(ctx, description) {
  * @param ctx - Host root context.
  */
 export function apply(ctx) {
-  ctx.inject(['webServer'], (web) => {
-    web.effect(() => web.webServer.register({
+  ctx.inject(['webServer', 'llm', 'agentDefaultModel'], (web) => mount(web))
+}
+
+/**
+ * Register the naming route on an already-resolved web server.
+ * @param web - context carrying the `webServer` service.
+ */
+/** Slot on the web server holding this route's disposer. */
+const SLOT = Symbol.for('dsh-quick-project.route.name')
+
+export function mount(web) {
+  {
+    // Replace, never duplicate: a running Host picks up new route code by
+    // mounting a module under a new URL, and two registrations of one path make
+    // `webServer` throw.
+    const previous = web.webServer[SLOT]
+    if (typeof previous === 'function') previous()
+    const dispose = web.effect(() => web.webServer.register({
       kind: 'exact',
       path: '/quick-project/name',
       // A `resource` route answers GET/HEAD only; naming needs a body, so this
@@ -188,7 +206,7 @@ export function apply(ctx) {
           return
         }
         try {
-          sendJson(res, 200, { ok: true, name: await suggestName(ctx, description) })
+          sendJson(res, 200, { ok: true, name: await suggestName(web, description) })
         } catch (error) {
           // Not an HTTP failure: the browser half falls back to its own name and
           // still creates the project, so a dead model must not look like a dead
@@ -201,5 +219,7 @@ export function apply(ctx) {
         }
       },
     }), 'quick-project: naming route')
-  })
+    web.webServer[SLOT] = dispose
+    return dispose
+  }
 }

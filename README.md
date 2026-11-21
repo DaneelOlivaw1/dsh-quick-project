@@ -31,7 +31,13 @@
 ## 三层分别在哪
 
 1. **取名**：宿主侧 `host/name-route.mjs`，`POST /quick-project/name`。用默认模型路由（`agentDefaultModel`）问一句，只取名字：答案里优先抓反引号/引号内的候选，再按「连字符数 + 长度」打分，所以模型回一句 "Here you go: `invoice-reconciler`" 也只会得到 `invoice-reconciler`。中文答案会给一个短中文名。模型挂了/路由不通时回 `ok:false`，浏览器侧用本地兜底名，项目照建不误。
-2. **建目录 + 开工作区**：浏览器侧。`directoryPicker.createDirectory` 建目录，工作区的登记与打开交给目录流的所有者（`onPicked`）。
+2. **建目录 + 开工作区**：建目录走宿主 `POST /quick-project/create`，工作区的登记与打开交给目录流的所有者（`onPicked`）。
+
+   为什么不调 `directoryPicker.createDirectory`：目录选择器是**组合出来的**——POSIX 上组合出应用内 `browse` 那一半（有 `createDirectory` / `list`），Windows 上组合出原生 `pick`（**只有** `pick`）。哪一半在，取决于平台，所以：
+   - 一边是 `createDirectory needs the browse capability; the composed picker serves "native"`（Windows）
+   - 另一边是 `directoryPicker.pick needs the native capability; the composed picker serves "browse"`（POSIX）
+
+   两种情况本插件都遇到过。现在建目录、列目录、删除全部走宿主（`host/project-fs.mjs`），宿主既知道真实路径分隔符，也永远有文件系统，不再依赖哪一半被组合出来。
 3. **把需求发出去**：`startSession(workspaceId, { prompt })` 只**填草稿**不发；`AutoSendGuard` 挂在 `conversation.input.left`，等它自己那个会话的草稿变成刚写进去的文字，再 `inputActions.submit()` 一次。
 
 「选择已有文件夹…」走的是 `listDirectory`（`browse` 能力），**不用** `directoryPicker.pick`：后者需要宿主的 `native` 能力，而用应用内选择器组装的部署只提供 `browse`，调过去会直接报 “needs the native capability”。
@@ -44,7 +50,7 @@ Harness 自带的「删除工作区」只注销登记，文件夹留在磁盘上
 
 删除端点的护栏（都在 `host/remove-route.mjs`，有测试）：
 
-- 只删宿主 home 之内的路径；
+- 只删宿主 home 之内的路径（分隔符按平台，Windows 的 `\\` 也算）；
 - 不删 home 本身、不删 `/`；
 - 不删项目根 `~/project`（一次点错不该清空所有项目）；
 - 不删 `~/.dsh` 里面任何东西（会话就在那儿）；
@@ -70,11 +76,13 @@ auto 取名还需要把宿主的取名路由挂上。它单独成模块，是因
 - insert:
     - id: quick-project-name
       name: file:///Users/daneel/project/dsh-quick-project/host/name-route.mjs?v=1
-    - id: quick-project-remove
-      name: file:///Users/daneel/project/dsh-quick-project/host/remove-route.mjs?v=1
+    - id: quick-project-fs
+      name: file:///Users/daneel/project/dsh-quick-project/host/project-fs.mjs?v=1
 ```
 
-`?v=1` 是给宿主内部用的版本号：改了对应的 `host/*.mjs` 之后把它 +1，再用插件管理器的「禁用→启用」切一次同名条目，新代码就会被导入（不 +1 会命中 ESM 缓存，跑的还是旧逻辑）。新增一个 `host/` 文件则是全新的 URL，直接加条目即可，无需 +1。
+普通安装**不需要**这一段：插件主模块（`index.mjs` → `host/routes.mjs`）在每次宿主启动时会把全部路由挂上。补丁条目只为一件事——让**已经在跑**的宿主立刻拿到新路由（改了 `host/*.mjs` 之后不用重启）。路由模块自己会先释放旧路由再挂新的，所以 `?v` 加一就是一次热替换，不会撞重复注册。
+
+`?v=N` 是给宿主内部用的版本号：改了对应的 `host/*.mjs`，把它 +1，宿主 recompose 时就会导入新代码并替换旧路由（不 +1 会命中 ESM 缓存，跑的还是旧逻辑）。
 
 ## 开发
 

@@ -280,10 +280,19 @@ const AUTO_SEND = { text: '', sessionId: '', deadline: 0 }
 /** How long the guard keeps waiting for its draft before giving up. */
 const AUTO_SEND_WINDOW_MS = 20_000
 
-/** Join one path segment onto a POSIX-ish parent without doubling the separator. */
+/**
+ * Join one path segment onto a parent, using the parent's own separator.
+ *
+ * Display only: the real path is the Host's answer, but a preview that reads
+ * `C:\\Users\\me\\project/name` looks broken on Windows.
+ * @param parent - absolute directory.
+ * @param name - one path segment.
+ * @returns the joined path.
+ */
 function joinPath(parent, name) {
-  const base = parent.endsWith('/') ? parent.slice(0, -1) : parent
-  return `${base}/${name}`
+  const separator = parent.includes('\\') && !parent.includes('/') ? '\\' : '/'
+  const base = parent.endsWith(separator) ? parent.slice(0, -1) : parent
+  return `${base}${separator}${name}`
 }
 
 /**
@@ -299,15 +308,25 @@ function isImeEnter(event) {
   return event.isComposing === true || event.keyCode === 229
 }
 
+/**
+ * POST JSON to one of this plugin's Host endpoints and always resolve to a body.
+ * @param url - endpoint path on the same origin.
+ * @param payload - JSON body.
+ * @returns the parsed body, or a synthetic failure carrying the status.
+ */
+async function postJson(url, payload) {
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  const body = await response.json().catch(() => undefined)
+  return body ?? { ok: false, error: `the Host answered ${response.status}` }
+}
+
 /** A name is one path segment: no separators, not blank, not a dot entry. */
 function invalidName(name) {
   return name === '' || name === '.' || name === '..' || /[/\\]/.test(name)
-}
-
-/** RPC faults spell "already there" differently across layers; the suffix is the stable part. */
-function mentionsExisting(error) {
-  const code = error?.rpcError?.code
-  return typeof code === 'string' && code.includes('exist')
 }
 
 /**
@@ -343,7 +362,7 @@ function fallbackName(description) {
 function QuickProjectFlow(props) {
   const {
     open, busy, onPicked, onCancel,
-    createDirectory, listDirectory, readDirectory, hostHome,
+    createProject, listProjects, hostHome,
     nameFromRequirement, waitForWorkspace, startSession, t,
   } = props
   const [description, setDescription] = useState('')
@@ -362,7 +381,11 @@ function QuickProjectFlow(props) {
   const descriptionRef = useRef(null)
 
   const home = hostHome()
-  const root = home === undefined || home === '' ? undefined : joinPath(home, 'project')
+  /** The real projects root, as the Host joins it (`~/project` on POSIX, `~\\project` on Windows). */
+  const [projectRoot, setProjectRoot] = useState(undefined)
+  /** Display-only guess used until the Host reports the real root. */
+  const rootFallback = home === undefined || home === '' ? undefined : joinPath(home, 'project')
+  const root = projectRoot ?? rootFallback
   const trimmedName = name.trim()
   const trimmedDescription = description.trim()
   const preview = root === undefined ? `~/project/${trimmedName}` : trimmedName === '' ? root : joinPath(root, trimmedName)
@@ -383,6 +406,11 @@ function QuickProjectFlow(props) {
     setListing(undefined)
     setListingError(undefined)
     setListingBusy(false)
+    // Ask the Host where projects live: the path separator is the Host's, not
+    // the browser's, and only the Host knows it.
+    listProjects()
+      .then((payload) => setProjectRoot(payload.root))
+      .catch(() => {})
     const focus = setTimeout(() => descriptionRef.current?.focus(), 30)
     return () => clearTimeout(focus)
   }, [open])
@@ -396,7 +424,7 @@ function QuickProjectFlow(props) {
     }
     let cancelled = false
     const probe = setTimeout(() => {
-      listDirectory(root)
+      listProjects(root)
         .then((listing) => {
           if (cancelled) return
           const hit = (listing?.entries ?? []).some((entry) => entry.name === trimmedName && entry.isDirectory !== false)
@@ -410,7 +438,7 @@ function QuickProjectFlow(props) {
       cancelled = true
       clearTimeout(probe)
     }
-  }, [open, root, trimmedName, listDirectory])
+  }, [open, root, trimmedName, listProjects])
 
   /**
    * Adopt one directory and start the Session with the requirement in it.
@@ -461,29 +489,12 @@ function QuickProjectFlow(props) {
       setError(resolved === '' ? t('error.name') : t('error.invalid'))
       return
     }
-    if (root === undefined) {
-      setError(t('error.home'))
-      return
-    }
-    const target = joinPath(root, resolved)
     setWorking(true)
     setError(undefined)
     try {
-      if (!existed) {
-        try {
-          await createDirectory(root, resolved)
-        } catch (reason) {
-          // A directory that appeared between the probe and the call is still
-          // the outcome asked for; let the Host resolve the Workspace there.
-          if (!mentionsExisting(reason)) throw reason
-        }
-      }
-      // The flow's owner adopts the directory and opens a blank Session; the
-      // requirement is added to that Session afterwards, once it exists.
-      if (trimmedDescription !== '') {
-        AUTO_SEND.text = trimmedDescription
-        AUTO_SEND.deadline = Date.now() + AUTO_SEND_WINDOW_MS
-      }
+      // `mkdir -p` semantics on the Host: an existing name is adopted rather
+      // than treated as an error, and the Host owns the path separator.
+      const target = await createProject(resolved)
       await finishWith(target)
     } catch (reason) {
       AUTO_SEND.text = ''
@@ -491,7 +502,7 @@ function QuickProjectFlow(props) {
     } finally {
       setWorking(false)
     }
-  }, [working, busy, trimmedName, trimmedDescription, root, existed, createDirectory, finishWith, nameFromRequirement, t])
+  }, [working, busy, trimmedName, trimmedDescription, createProject, finishWith, nameFromRequirement, t])
 
   /** Read one directory into the browser pane. */
   const load = useCallback(async (path) => {
@@ -502,13 +513,13 @@ function QuickProjectFlow(props) {
     setListingBusy(true)
     setListingError(undefined)
     try {
-      setListing(await readDirectory(path))
+      setListing(await listProjects(path))
     } catch (reason) {
       setListingError(t('browse.failed', { message: reason instanceof Error ? reason.message : String(reason) }))
     } finally {
       setListingBusy(false)
     }
-  }, [readDirectory, t])
+  }, [listProjects, t])
 
   const choose = useCallback(async () => {
     if (working || busy === true) return
@@ -778,12 +789,23 @@ export function apply(ctx) {
   }), 'quick-project: delete-with-folder menu action')
 
   const injected = () => ({
-    createDirectory: (path, name) => ctx.uiWorkspace.createDirectory(path, name),
-    listDirectory: (path, signal) => ctx.uiWorkspace.listDirectory(path, signal),
-    // `directoryPicker.pick` needs the Host's *native* capability. Deployments
-    // composed with the in-app browser serve `browse` instead, so the fallback
-    // walks `listDirectory` itself rather than assuming a native dialog exists.
-    readDirectory: (path, signal) => ctx.uiWorkspace.listDirectory(path, signal),
+    // The directory picker is *composed*: POSIX deployments serve the in-app
+    // `browse` half (`createDirectory`, `list`), Windows serves the native half
+    // (`pick` only). Asking `uiWorkspace` for either half breaks on the other
+    // platform, so creation and listing go through the Host, which knows the
+    // real separator and always has a filesystem.
+    createProject: async (name) => {
+      const body = await postJson('/quick-project/create', { name })
+      if (body.ok !== true || typeof body.path !== 'string') {
+        throw new Error(body.message ?? body.error ?? 'the Host could not create the folder')
+      }
+      return body.path
+    },
+    listProjects: async (path) => {
+      const body = await postJson('/quick-project/list', path === undefined || path === '' ? {} : { path })
+      if (body.ok !== true) throw new Error(body.message ?? body.error ?? 'the Host could not list the folder')
+      return body
+    },
     hostHome: () => ctx.remote.$host.home,
     startSession: (workspaceId, options) => ctx.uiWorkspace.startSession(workspaceId, options),
     /**

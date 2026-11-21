@@ -10,24 +10,28 @@ import { apply } from '../host/name-route.mjs'
 /** A ctx that records the route the plugin registers. */
 function fakeContext({ route = { provider: 'fake', model: 'fake-1' }, answer = 'invoice-reconciler', fail } = {}) {
   const registered = []
-  const ctx = {
-    llm: {
-      prepareCall: async (config) => ({
-        config,
-        stream: async function* () {
-          if (fail !== undefined) throw fail
-          for (const text of Array.isArray(answer) ? answer : [answer]) {
-            yield { type: 'text-delta', index: 0, text }
-          }
-        },
-      }),
-    },
-    agentDefaultModel: { currentSelection: () => route },
-    inject: (_services, callback) => callback(web),
-    effect: (callback) => callback(),
-  }
+  // A child context inherits the parent's services, so the fake `web` carries
+  // them too: `mount(web)` resolves `llm` and `agentDefaultModel` from it.
   const web = {
     webServer: { register: (routeSpec) => registered.push(routeSpec) },
+    effect: (callback) => callback(),
+  }
+  web.llm = {
+    prepareCall: async (config) => ({
+      config,
+      stream: async function* () {
+        if (fail !== undefined) throw fail
+        for (const text of Array.isArray(answer) ? answer : [answer]) {
+          yield { type: 'text-delta', index: 0, text }
+        }
+      },
+    }),
+  }
+  web.agentDefaultModel = { currentSelection: () => route }
+  const ctx = {
+    llm: web.llm,
+    agentDefaultModel: web.agentDefaultModel,
+    inject: (_services, callback) => callback(web),
     effect: (callback) => callback(),
   }
   return { ctx, registered }
