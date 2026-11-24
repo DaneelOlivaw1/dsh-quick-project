@@ -4,6 +4,8 @@
 
 原来的路径是：点 + → 目录树里一层层翻到 `~/project` → 新建文件夹 → 返回 → 找出来 → 再把手里的需求重打一遍。这个插件把它压成「打一段话 → 回车」。
 
+**克隆已有项目**也走同一个入口：点「克隆 Git 仓库…」，粘贴地址，克隆到 `~/project/<仓库名>`，**带实时进度**，克隆完自动开工作区、把下面写的需求发出去。
+
 ## 长什么样
 
 ![描述需求，自动取名](docs/dialog.png)
@@ -17,30 +19,52 @@
 | 动作 | 结果 |
 |---|---|
 | 点「+」，描述需求，点「创建并开始」 | 这时才请求模型取名（如 `alipay-bill-summary`）→ 在 `~/project/<名字>` 建目录 → 打开工作区 → 新会话里把需求**发出去** |
+| 点「+」→「克隆 Git 仓库…」，粘贴地址 | `git clone --progress` 到 `~/project/<仓库名>`；进度条按 git 自己的阶段走（接收/解析/压缩对象…）；**克隆完成后自动开工作区并发送下面写的需求** |
 | 只填「项目名」、不写需求 | 直接建目录并打开空白会话 |
-| 名字不满意 | 「项目名」那一栏随时可改，改了就不再被自动覆盖 |
+| 只粘贴仓库地址、不写需求 | 克隆完只打开工作区，不发消息 |
+| 名字不满意 | 「项目名」那一栏随时可改，改了就不再被自动覆盖；克隆模式下留空则用仓库名 |
 | 输入一个已存在的名字 | 提示「同名文件夹已存在，将直接打开」→ 打开它，需求照样发出 |
-| `Esc` / 点遮罩 / 取消 | 关闭，什么都不建 |
+| `Esc` / 点遮罩 / 取消 | 关闭，什么都不建；**已开始的克隆不会被中断** |
 | 「选择已有文件夹…」 | 打开应用内目录浏览（面包屑 + 子目录列表），选中即可用；不依赖宿主的原生选择器 |
 | 工作区右键 →「删除项目（含文件夹）」 | 确认后**连磁盘目录一起删**；原来的「删除工作区」只注销登记、留目录 |
 
-`Shift+回车` 换行。名称必须是单个路径段：不能为空，不能含 `/` 或 `\`。
+`Shift+回车` 换行。
 
 **取名只在按下「创建并开始」（或回车）时发生一次**，打字过程中不发请求、名字栏也不动——名字在你眼前跳来跳去会像是已经动手了。名字栏留空即按需求取名；自己填了就用你填的。
 
+## 命名规则：文件夹名只能是 ASCII
+
+项目名 = 文件夹名 = 一个**小写 ASCII** 路径段：`^[a-z0-9]+(-[a-z0-9]+)*$`，最多 40 字符。
+
+- 中文名会被**明确拒绝**（提示「名称只能用 a-z、0-9 和连字符」），而不是悄悄转拼音或截掉汉字——`账单汇总` 变成空字符串比报错更糟。
+- 模型偶尔仍会答中文。这种答案里的汉字**不再**被当作名字返回：命名路由报失败，浏览器侧用 ASCII 兜底（描述里的英文词，或 `project-1124-1536` 这种时间戳名）。
+- 规则只有一份：`host/naming.mjs`。命名路由、`/quick-project/create`、克隆路由、浏览器侧都读它，`npm test` 里 `test/naming.test.mjs` 锁住它。
+
 ## 三层分别在哪
 
-1. **取名**：宿主侧 `host/name-route.mjs`，`POST /quick-project/name`。用默认模型路由（`agentDefaultModel`）问一句，只取名字：答案里优先抓反引号/引号内的候选，再按「连字符数 + 长度」打分，所以模型回一句 "Here you go: `invoice-reconciler`" 也只会得到 `invoice-reconciler`。中文答案会给一个短中文名。模型挂了/路由不通时回 `ok:false`，浏览器侧用本地兜底名，项目照建不误。
-2. **建目录 + 开工作区**：建目录走宿主 `POST /quick-project/create`，工作区的登记与打开交给目录流的所有者（`onPicked`）。
+1. **取名**：宿主侧 `host/name-route.mjs`，`POST /quick-project/name`。用默认模型路由（`agentDefaultModel`）问一句，只取名字：答案里优先抓反引号/引号内的候选，再按「连字符数 + 长度」打分，所以模型回一句 "Here you go: `invoice-reconciler`" 也只会得到 `invoice-reconciler`。模型挂了/路由不通时回 `ok:false`，浏览器侧用本地兜底名，项目照建不误。
+2. **建目录 / 克隆 + 开工作区**：建目录走宿主 `POST /quick-project/create`，克隆走 `POST /quick-project/clone`（+ 轮询 `POST /quick-project/clone-status`），工作区的登记与打开交给目录流的所有者（`onPicked`）。
 
    为什么不调 `directoryPicker.createDirectory`：目录选择器是**组合出来的**——POSIX 上组合出应用内 `browse` 那一半（有 `createDirectory` / `list`），Windows 上组合出原生 `pick`（**只有** `pick`）。哪一半在，取决于平台，所以：
    - 一边是 `createDirectory needs the browse capability; the composed picker serves "native"`（Windows）
    - 另一边是 `directoryPicker.pick needs the native capability; the composed picker serves "browse"`（POSIX）
 
-   两种情况本插件都遇到过。现在建目录、列目录、删除全部走宿主（`host/project-fs.mjs`），宿主既知道真实路径分隔符，也永远有文件系统，不再依赖哪一半被组合出来。
-3. **把需求发出去**：`startSession(workspaceId, { prompt })` 只**填草稿**不发；`AutoSendGuard` 挂在 `conversation.input.left`，等它自己那个会话的草稿变成刚写进去的文字，再 `inputActions.submit()` 一次。
+   两种情况本插件都遇到过。现在建目录、列目录、删除、**克隆**全部走宿主（`host/project-fs.mjs`、`host/clone-route.mjs`），宿主既知道真实路径分隔符，也永远有文件系统和子进程，不再依赖哪一半被组合出来。
+3. **把需求发出去**：`startSession(workspaceId, { prompt })` 只**填草稿**不发；`AutoSendGuard` 挂在 `conversation.input.left`，等它自己那个会话的草稿变成刚写进去的文字，再 `inputActions.submit()` 一次。新建和克隆**共用这一段**：克隆完成也是拿到目录后调同一个 `finishWith`。
 
 「选择已有文件夹…」走的是 `listDirectory`（`browse` 能力），**不用** `directoryPicker.pick`：后者需要宿主的 `native` 能力，而用应用内选择器组装的部署只提供 `browse`，调过去会直接报 “needs the native capability”。
+
+## 克隆的进度是怎么来的
+
+`git clone --progress` 把进度写在 **stderr**，且用 `\r` 覆盖同一行。宿主把它逐行解析成 `{ phase, percent, line }`：
+
+- `phase` 来自 git 自己的标签（`Receiving objects` → `receiving`，`Resolving deltas` → `resolving`，还有 `counting` / `compressing` / `enumerating` / `starting`），对话框把这几个词翻译成人话；
+- `percent` 取那一行的数字，并**钳制成不回退**——`Resolving deltas` 会从 0% 重新开始数，进度条往回跳会读成「重来一遍」；
+- 跨 chunk 被切断的行会先缓存再拼，不会读半行。
+
+克隆**在宿主后台跑，不占着 HTTP 响应**，所以大仓库不会把请求挂死；对话框关掉克隆也继续，下次打开同一个工作区就是它的结果。失败时**自动删掉半成品目录**，免得下次被当成已存在的工作区打开。
+
+`git` 不在 PATH 上会明确报「git is not installed, or not on the Host PATH」，而不是静默失败。
 
 ## 删掉建错的项目
 
@@ -74,25 +98,27 @@ auto 取名还需要把宿主的取名路由挂上。它单独成模块，是因
 
 ```yaml
 - insert:
-    - id: quick-project-name
-      name: file:///Users/daneel/project/dsh-quick-project/host/name-route.mjs?v=1
-    - id: quick-project-fs
-      name: file:///Users/daneel/project/dsh-quick-project/host/project-fs.mjs?v=1
+    - id: quick-project-routes
+      name: file:///Users/daneel/project/dsh-quick-project/host/routes.mjs?v=1
 ```
+
+`host/routes.mjs` 一个入口挂全部路由（取名、建/列/删目录、克隆与克隆进度），所以补丁只需一条。
 
 普通安装**不需要**这一段：插件主模块（`index.mjs` → `host/routes.mjs`）在每次宿主启动时会把全部路由挂上。补丁条目只为一件事——让**已经在跑**的宿主立刻拿到新路由（改了 `host/*.mjs` 之后不用重启）。路由模块自己会先释放旧路由再挂新的，所以 `?v` 加一就是一次热替换，不会撞重复注册。
 
 `?v=N` 是给宿主内部用的版本号：改了对应的 `host/*.mjs`，把它 +1，宿主 recompose 时就会导入新代码并替换旧路由（不 +1 会命中 ESM 缓存，跑的还是旧逻辑）。
+
+**热替换条目的生命周期有个坑**：这条 insert 一旦被注释掉或删除，recompose **会卸载它挂载的路由**，而启动时主模块挂的那份早已被它替换掉了——于是运行中的宿主一条 quick-project 路由都不剩（`/quick-project/*` 落到 SPA 兜底，新建对话框直接报错）。所以撤掉热替换的正确做法是**重启宿主**（主模块会重新挂上），而不是把条目注释掉；或者把 `?v` 再 +1 保持插件仍被挂载，下次启动交给主模块。
 
 ## 开发
 
 ```bash
 node scripts/build.mjs                          # 重建 client/client.js
 DSH_QUICK_PROJECT_DEBUG=1 node scripts/build.mjs # 不压缩
-npm test                                        # 宿主侧：取名路由 + 删除路由的契约
+npm test                                        # 命名规则 + 取名/克隆/目录路由的契约
 ```
 
-改 `client/src/client.js` 后必须重建：宿主下发的是 `client/client.js` 这个打包产物。React 保持外置（loader 的 require 表持有它，打进包里会出现第二份副本并破坏 hooks）。
+改 `client/src/client.js` 后必须重建：宿主下发的是 `client/client.js` 这个打包产物。React 保持外置（loader 的 require 表持有它，打进包里会出现第二份副本并破坏 hooks）。`host/naming.mjs` 会被打进客户端产物（两边共用一份规则），所以改它也要重建。
 
 文案在 `client/src/client.js` 顶部的 `LABELS`（zh/en）。项目根目录是宿主 home 下的 `project/`。
 
@@ -100,3 +126,6 @@ npm test                                        # 宿主侧：取名路由 + 删
 
 - 「+」弹出的是对话框，不是常驻在侧栏里的输入框：那一行（搜索/排序/+）官方没有开放 slot，硬塞只能靠 DOM 注入，且 280px 的侧栏塞不下三个图标加输入框。
 - 需求发出后模型会立刻开始干活。名字没取好时先改名字再回车，比事后重命名工作区便宜。
+- 克隆是**「clone 完就开」**：不探测仓库结构（没有根 `package.json` 也不会问）、不装依赖、不切分支。
+- 地址支持 `https://`、`ssh://`、`git@host:owner/repo`、`file:///…` 和本地路径。私有库要宿主环境里已有凭据：`GIT_TERMINAL_PROMPT=0`，不会弹交互式登录，缺凭据会直接失败。
+- 中文名是**拒绝**而不是转拼音。想用拼音得自己拼好填进名字栏（`zhangdan-huizong`），规则不替你做语言转换。

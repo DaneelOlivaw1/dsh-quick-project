@@ -12,6 +12,7 @@
 
 import { mount as mountNameRoute } from './name-route.mjs'
 import { mount as mountProjectFs } from './project-fs.mjs'
+import { mount as mountClone } from './clone-route.mjs'
 
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'quick-project-routes'
@@ -34,10 +35,11 @@ const MOUNTED = Symbol.for('dsh-quick-project.routes-mounted')
  */
 export function apply(ctx) {
   ctx.inject(['webServer', 'llm', 'agentDefaultModel'], (web) => {
-    // Each module replaces its own routes on mount, so calling both is safe no
-    // matter how many times this runs.
+    // Each module replaces its own routes on mount, so calling all three is safe
+    // no matter how many times this runs.
     mountNameRoute(web)
     mountProjectFs(web)
+    mountClone(web)
     web.webServer[MOUNTED] = true
   })
 }

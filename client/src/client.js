@@ -26,6 +26,10 @@
 //     draft to become the text we just asked for, and submits once.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
+// The naming rule comes from the Host half so the two halves cannot drift: the
+// same file decides what the model may answer, what a repository URL becomes,
+// and what this dialog's field accepts. The bundler inlines it.
+import { isValidName, nameFromRepoUrl, nameProblem, timestampName } from '../../host/naming.mjs'
 
 /** Locale namespace owning this dialog's copy. */
 const NS = 'quick-project'
@@ -60,9 +64,33 @@ const LABELS = {
     exists: '同名文件夹已存在，将直接打开',
     'error.name': '还需要一个项目名（或写点需求自动取）',
     'error.invalid': '名称不能为空，也不能包含 “/” 或 “\\”',
+    'error.ascii': '名称只能用 a-z、0-9 和连字符，不要用中文',
     'error.home': '还没拿到宿主主目录，稍等一秒再试',
     'error.failed': '创建失败：{message}',
     foot: '回车创建 · Shift+回车换行 · Esc 取消',
+    'clone.link': '克隆 Git 仓库…',
+    'clone.back': '返回新建项目',
+    'clone.title': '克隆 Git 仓库',
+    'clone.subtitle': '粘贴仓库地址，克隆到 ~/project 并直接开始；需求写在下面，克隆完自动发出去',
+    'clone.urlLabel': '仓库地址',
+    'clone.urlPlaceholder': 'https://github.com/owner/repo.git 或 git@github.com:owner/repo.git',
+    'clone.namePlaceholder': '留空则用仓库名',
+    'clone.start': '克隆并开始',
+    'clone.starting': '正在启动克隆…',
+    'clone.progress': '克隆中 · {percent}%',
+    'clone.phase.starting': '准备克隆…',
+    'clone.phase.counting': '统计对象…',
+    'clone.phase.compressing': '压缩对象…',
+    'clone.phase.enumerating': '枚举对象…',
+    'clone.phase.receiving': '接收对象…',
+    'clone.phase.resolving': '解析差异…',
+    'clone.phase.done': '克隆完成',
+    'clone.phase.failed': '克隆失败',
+    'clone.error': '克隆失败：{message}',
+    'clone.exists': '「{name}」已经有内容了，换个项目名或先删掉它',
+    'clone.requirement': '克隆完之后要我做什么？留空就只是打开它',
+    'clone.noUrl': '先粘贴一个仓库地址',
+    'clone.foot': '回车开始克隆 · Shift+回车换行 · Esc 取消',
   },
   en: {
     title: 'New project',
@@ -93,9 +121,33 @@ const LABELS = {
     exists: 'That folder already exists; it will be opened',
     'error.name': 'A name is needed — or describe the project and it is named for you',
     'error.invalid': 'A name is required and may not contain “/” or “\\”',
+    'error.ascii': 'Use lowercase a-z, 0-9 and hyphens — no Chinese characters',
     'error.home': 'The Host home directory is not available yet — try again in a second',
     'error.failed': 'Could not create it: {message}',
     foot: 'Enter to create · Shift+Enter for a new line · Esc to cancel',
+    'clone.link': 'Clone a Git repository…',
+    'clone.back': 'Back to new project',
+    'clone.title': 'Clone a Git repository',
+    'clone.subtitle': 'Paste the repository URL; it is cloned into ~/project and opened. Put what you want done below and it is sent once the clone finishes.',
+    'clone.urlLabel': 'Repository',
+    'clone.urlPlaceholder': 'https://github.com/owner/repo.git or git@github.com:owner/repo.git',
+    'clone.namePlaceholder': 'Left blank, named after the repository',
+    'clone.start': 'Clone and start',
+    'clone.starting': 'Starting the clone…',
+    'clone.progress': 'Cloning · {percent}%',
+    'clone.phase.starting': 'Preparing…',
+    'clone.phase.counting': 'Counting objects…',
+    'clone.phase.compressing': 'Compressing objects…',
+    'clone.phase.enumerating': 'Enumerating objects…',
+    'clone.phase.receiving': 'Receiving objects…',
+    'clone.phase.resolving': 'Resolving deltas…',
+    'clone.phase.done': 'Cloned',
+    'clone.phase.failed': 'Clone failed',
+    'clone.error': 'The clone failed: {message}',
+    'clone.exists': '“{name}” already has content — pick another name or delete it first',
+    'clone.requirement': 'What should be done once it is cloned? Left blank, it is only opened',
+    'clone.noUrl': 'Paste a repository URL first',
+    'clone.foot': 'Enter to clone · Shift+Enter for a new line · Esc to cancel',
   },
 }
 
@@ -218,6 +270,21 @@ const FOOT = {
   color: 'var(--dsw-alias-label-caption, rgba(0,0,0,.4))',
 }
 
+const PROGRESS_TRACK = {
+  width: '100%',
+  height: '6px',
+  overflow: 'hidden',
+  background: 'var(--dsw-alias-interactive-bg-hover, rgba(0,0,0,.06))',
+  borderRadius: '999px',
+}
+
+const PROGRESS_BAR = {
+  height: '100%',
+  background: 'var(--dsw-alias-state-business-primary, #1f6feb)',
+  borderRadius: '999px',
+  transition: 'width 200ms linear',
+}
+
 const CRUMBS = {
   display: 'flex',
   flexWrap: 'wrap',
@@ -324,34 +391,51 @@ async function postJson(url, payload) {
   return body ?? { ok: false, error: `the Host answered ${response.status}` }
 }
 
-/** A name is one path segment: no separators, not blank, not a dot entry. */
+/**
+ * True when a name can be used as a folder name.
+ *
+ * Chinese is refused rather than stripped: 「账单汇总」 silently becoming an
+ * empty string is a worse answer than saying the name has to be ASCII.
+ * @param name - the candidate.
+ * @returns whether the name is legal.
+ */
 function invalidName(name) {
-  return name === '' || name === '.' || name === '..' || /[/\\]/.test(name)
+  return !isValidName(name)
 }
 
 /**
- * A name that needs no model: the description's first CJK characters, else its
- * first ASCII words, else a timestamped one. Used when the Host could not name
- * it — a Host whose module predates the naming route, a dead model, or an
- * offline route.
+ * A name that needs no model: the description's ASCII words, else a timestamped
+ * one. Used when the Host could not name it — a Host whose module predates the
+ * naming route, a dead model, an offline route, or a model that answered in
+ * Chinese (its Han characters are not a legal name any more, and there is
+ * nothing to salvage from them).
  * @param description - whatever the user typed.
  * @returns a valid single path segment.
  */
 function fallbackName(description) {
-  // Chinese first: in a Chinese description an ASCII word is usually a
-  // technical term ("CSV", "API"), which names the file format, not the project.
-  const han = (description.match(/[\u4e00-\u9fa5]+/g) ?? [])
-    .join('')
-    .replace(/^(?:帮我|帮忙|请|我|要|想|把|将|做|写|开发|实现|搞|弄|搭|建|一个|一套|一份|个|套|份|的)+/, '')
-    .slice(0, 8)
-    .replace(/[的了]$/, '')
-  if (han !== '' && !invalidName(han)) return han
-  const words = (description.match(/[A-Za-z0-9]+/g) ?? []).slice(0, 3)
+  // ASCII only: in a Chinese description an ASCII word is usually a technical
+  // term ("CSV", "API"), which names the file format — but it is still a legal
+  // name, and a timestamp is the honest last resort.
+  const words = (String(description).match(/[A-Za-z0-9]+/g) ?? []).slice(0, 3)
   const slug = words.join('-').toLowerCase().slice(0, 40).replace(/-+$/g, '')
   if (slug !== '' && !invalidName(slug)) return slug
-  const now = new Date()
-  const two = (value) => String(value).padStart(2, '0')
-  return `project-${two(now.getMonth() + 1)}${two(now.getDate())}-${two(now.getHours())}${two(now.getMinutes())}`
+  return timestampName()
+}
+
+/**
+ * The sentence for a name the rule refused.
+ *
+ * Chinese gets its own line: it is the case the person actually hits, and
+ * "cannot contain / or \" would be a misleading explanation of it.
+ * @param name - the rejected name.
+ * @param t - this plugin's translator.
+ * @returns the message to show.
+ */
+function nameErrorText(name, t) {
+  const problem = nameProblem(name)
+  if (problem === 'empty') return t('error.name')
+  if (problem === 'non-ascii') return t('error.ascii')
+  return t('error.invalid')
 }
 
 /**
@@ -378,7 +462,15 @@ function QuickProjectFlow(props) {
   const [listing, setListing] = useState(undefined)
   const [listingError, setListingError] = useState(undefined)
   const [listingBusy, setListingBusy] = useState(false)
+  /** The repository address in clone mode. */
+  const [repoUrl, setRepoUrl] = useState('')
+  /** The requirement typed in clone mode; kept apart from `description` so switching modes cannot cross the two. */
+  const [cloneDescription, setCloneDescription] = useState('')
+  /** The running clone's progress, as the Host reported it. */
+  const [clone, setClone] = useState(undefined)
   const descriptionRef = useRef(null)
+  /** The repository field's own ref: clone mode focuses it, not the requirement. */
+  const repoUrlRef = useRef(null)
 
   const home = hostHome()
   /** The real projects root, as the Host joins it (`~/project` on POSIX, `~\\project` on Windows). */
@@ -388,7 +480,18 @@ function QuickProjectFlow(props) {
   const root = projectRoot ?? rootFallback
   const trimmedName = name.trim()
   const trimmedDescription = description.trim()
-  const preview = root === undefined ? `~/project/${trimmedName}` : trimmedName === '' ? root : joinPath(root, trimmedName)
+  const trimmedRepoUrl = repoUrl.trim()
+  /**
+   * The folder a clone lands in: the pinned name, else the one the Host will
+   * derive from the URL. Showing it while typing is the point — the destination
+   * should be visible before git runs, not after.
+   */
+  const cloneFolder = trimmedName !== '' ? trimmedName : nameFromRepoUrl(trimmedRepoUrl)
+  const preview = root === undefined
+    ? `~/project/${trimmedName}`
+    : mode === 'clone'
+      ? (cloneFolder === '' ? root : joinPath(root, cloneFolder))
+      : (trimmedName === '' ? root : joinPath(root, trimmedName))
   const pending = working || busy === true || naming
 
   // A fresh dialog each time it opens: no stale text, no stale complaint.
@@ -406,6 +509,9 @@ function QuickProjectFlow(props) {
     setListing(undefined)
     setListingError(undefined)
     setListingBusy(false)
+    setRepoUrl('')
+    setCloneDescription('')
+    setClone(undefined)
     // Ask the Host where projects live: the path separator is the Host's, not
     // the browser's, and only the Host knows it.
     listProjects()
@@ -442,15 +548,21 @@ function QuickProjectFlow(props) {
 
   /**
    * Adopt one directory and start the Session with the requirement in it.
+   *
+   * Both modes end here: a freshly created folder and a freshly cloned one are
+   * the same thing from this point on, and running the requirement through one
+   * path is why "clone, then do this" needs no separate sending machinery.
    * @param path - absolute directory the flow was pointed at.
+   * @param requirement - what to send once the Session exists; blank opens it empty.
    */
-  const finishWith = useCallback(async (path) => {
-    if (trimmedDescription !== '') {
-      AUTO_SEND.text = trimmedDescription
+  const finishWith = useCallback(async (path, requirement = trimmedDescription) => {
+    const prompt = String(requirement ?? '').trim()
+    if (prompt !== '') {
+      AUTO_SEND.text = prompt
       AUTO_SEND.deadline = Date.now() + AUTO_SEND_WINDOW_MS
     }
     onPicked(path)
-    if (trimmedDescription === '') return
+    if (prompt === '') return
     const workspaceId = await waitForWorkspace(path)
     if (workspaceId === undefined) return
     AUTO_SEND.sessionId = workspaceId
@@ -459,10 +571,10 @@ function QuickProjectFlow(props) {
     // loser's `beforeOpen` — which carries the requirement — is dropped with it.
     // Adopting a blank that already exists therefore gets a second try once the
     // first attempt has settled.
-    await startSession(workspaceId, { prompt: trimmedDescription, clearPreviousDraft: true })
+    await startSession(workspaceId, { prompt, clearPreviousDraft: true })
     await new Promise((resolve) => setTimeout(resolve, 700))
     if (AUTO_SEND.text !== '') {
-      await startSession(workspaceId, { prompt: trimmedDescription, clearPreviousDraft: true })
+      await startSession(workspaceId, { prompt, clearPreviousDraft: true })
     }
   }, [trimmedDescription, onPicked, waitForWorkspace, startSession])
 
@@ -486,7 +598,7 @@ function QuickProjectFlow(props) {
       }
     }
     if (invalidName(resolved)) {
-      setError(resolved === '' ? t('error.name') : t('error.invalid'))
+      setError(nameErrorText(resolved, t))
       return
     }
     setWorking(true)
@@ -503,6 +615,82 @@ function QuickProjectFlow(props) {
       setWorking(false)
     }
   }, [working, busy, trimmedName, trimmedDescription, createProject, finishWith, nameFromRequirement, t])
+
+  /**
+   * Start a clone and follow it to the end.
+   *
+   * The clone runs on the Host detached from this request, so this only polls:
+   * a slow repository cannot hold a response open, and the dialog still shows
+   * what git is doing (its own `Receiving objects: 47%` line) instead of
+   * freezing behind a spinner.
+   */
+  const startClone = useCallback(async () => {
+    if (working || busy === true) return
+    const url = repoUrl.trim()
+    if (url === '') {
+      setError(t('clone.noUrl'))
+      return
+    }
+    setWorking(true)
+    setError(undefined)
+    setClone({ phase: 'starting', percent: 0, line: '' })
+    let id
+    try {
+      const answer = await postJson('/quick-project/clone', {
+        url,
+        name: trimmedName === '' ? undefined : trimmedName,
+      })
+      if (answer.ok !== true || typeof answer.id !== 'string') {
+        // The Host refuses a directory that already holds something; say that in
+        // the person's words rather than forwarding git's.
+        setError(answer.error === 'exists'
+          ? t('clone.exists', { name: answer.name ?? trimmedName })
+          : answer.message ?? answer.error ?? 'the Host could not start the clone')
+        setClone(undefined)
+        return
+      }
+      id = answer.id
+    } catch (reason) {
+      setError(t('clone.error', { message: reason instanceof Error ? reason.message : String(reason) }))
+      setClone(undefined)
+      return
+    }
+
+    // Poll until the Host reports a terminal phase. The dialog can be closed
+    // meanwhile: the clone keeps running there, and the Workspace is opened from
+    // whichever poll sees it finish.
+    for (;;) {
+      await new Promise((resolve) => setTimeout(resolve, 400))
+      let status
+      try {
+        status = await postJson('/quick-project/clone-status', { id })
+      } catch {
+        continue
+      }
+      if (status.ok !== true) {
+        setError(t('clone.error', { message: status.message ?? status.error ?? 'the clone stopped being tracked' }))
+        setClone(undefined)
+        setWorking(false)
+        return
+      }
+      setClone(status)
+      if (status.phase === 'done') {
+        try {
+          await finishWith(status.path, cloneDescription)
+        } catch (reason) {
+          setError(t('clone.error', { message: reason instanceof Error ? reason.message : String(reason) }))
+        } finally {
+          setWorking(false)
+        }
+        return
+      }
+      if (status.phase === 'failed') {
+        setError(t('clone.error', { message: status.error ?? 'git exited without a reason' }))
+        setWorking(false)
+        return
+      }
+    }
+  }, [working, busy, repoUrl, trimmedName, cloneDescription, finishWith, t])
 
   /** Read one directory into the browser pane. */
   const load = useCallback(async (path) => {
@@ -530,21 +718,32 @@ function QuickProjectFlow(props) {
 
   if (!open) return null
 
+  /** The clone's own progress line: git's phase in words, its percentage, and its raw line underneath. */
+  const clonePhaseText = clone === undefined
+    ? ''
+    : t(`clone.phase.${clone.phase}`) !== `clone.phase.${clone.phase}`
+      ? t(`clone.phase.${clone.phase}`)
+      : t('clone.phase.starting')
+
   const status = error !== undefined
     ? { text: error, color: 'var(--dsw-alias-state-error-primary, #d1242f)' }
-    : busy === true
-      ? { text: t('opening'), color: undefined }
-      : working
-        ? { text: t('creating'), color: undefined }
-        : naming
-          ? { text: t('naming'), color: undefined }
-          : existed
-            ? { text: t('exists'), color: 'var(--dsw-alias-label-secondary, rgba(0,0,0,.7))' }
-            : nameNote !== undefined
-              ? { text: nameNote, color: 'var(--dsw-alias-label-tertiary, rgba(0,0,0,.55))' }
-              : trimmedName === '' && trimmedDescription !== ''
-                ? { text: t('name.will'), color: 'var(--dsw-alias-label-tertiary, rgba(0,0,0,.55))' }
-                : { text: preview, color: 'var(--dsw-alias-label-secondary, rgba(0,0,0,.7))' }
+    : clone !== undefined && clone.phase !== 'done' && clone.phase !== 'failed'
+      ? { text: `${clonePhaseText} ${t('clone.progress', { percent: clone.percent ?? 0 })}${clone.line === '' || clone.line === undefined ? '' : ` · ${clone.line}`}`, color: 'var(--dsw-alias-label-secondary, rgba(0,0,0,.7))' }
+      : busy === true
+        ? { text: t('opening'), color: undefined }
+        : working
+          ? { text: mode === 'clone' ? t('clone.starting') : t('creating'), color: undefined }
+          : naming
+            ? { text: t('naming'), color: undefined }
+            : existed && mode !== 'clone'
+              ? { text: t('exists'), color: 'var(--dsw-alias-label-secondary, rgba(0,0,0,.7))' }
+              : nameNote !== undefined
+                ? { text: nameNote, color: 'var(--dsw-alias-label-tertiary, rgba(0,0,0,.55))' }
+                : trimmedName === '' && trimmedDescription !== '' && mode !== 'clone'
+                  ? { text: t('name.will'), color: 'var(--dsw-alias-label-tertiary, rgba(0,0,0,.55))' }
+                  : { text: mode === 'clone' && cloneFolder === '' ? t('clone.noUrl') : preview, color: 'var(--dsw-alias-label-secondary, rgba(0,0,0,.7))' }
+
+  const dialogTitle = mode === 'browse' ? t('browse.title') : mode === 'clone' ? t('clone.title') : t('title')
 
   return (
     <div
@@ -553,8 +752,8 @@ function QuickProjectFlow(props) {
         if (event.target === event.currentTarget && !pending) onCancel()
       }}
     >
-      <div style={CARD} role="dialog" aria-modal="true" aria-label={mode === 'browse' ? t('browse.title') : t('title')}>
-        <div style={TITLE}>{mode === 'browse' ? t('browse.title') : t('title')}</div>
+      <div style={CARD} role="dialog" aria-modal="true" aria-label={dialogTitle}>
+        <div style={TITLE}>{dialogTitle}</div>
         {mode === 'browse' ? (
           <>
             <div style={CRUMBS}>
@@ -630,6 +829,116 @@ function QuickProjectFlow(props) {
               </button>
             </div>
           </>
+        ) : mode === 'clone' ? (
+          <>
+            <div style={SUBTITLE}>{t('clone.subtitle')}</div>
+            <div style={NAME_ROW}>
+              <span style={NAME_LABEL}>{t('clone.urlLabel')}</span>
+              <input
+                ref={repoUrlRef}
+                style={NAME_INPUT}
+                value={repoUrl}
+                placeholder={t('clone.urlPlaceholder')}
+                spellCheck={false}
+                autoComplete="off"
+                disabled={pending}
+                onChange={(event) => {
+                  setRepoUrl(event.target.value)
+                  setError(undefined)
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    if (isImeEnter(event)) return
+                    event.preventDefault()
+                    startClone()
+                  } else if (event.key === 'Escape') {
+                    event.preventDefault()
+                    onCancel()
+                  }
+                }}
+              />
+            </div>
+            <textarea
+              ref={descriptionRef}
+              style={{ ...FIELD, minHeight: '64px' }}
+              rows={3}
+              value={cloneDescription}
+              placeholder={t('clone.requirement')}
+              spellCheck={false}
+              disabled={pending}
+              onChange={(event) => {
+                setCloneDescription(event.target.value)
+                setError(undefined)
+              }}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' && !event.shiftKey) {
+                  if (isImeEnter(event)) return
+                  event.preventDefault()
+                  startClone()
+                } else if (event.key === 'Escape') {
+                  event.preventDefault()
+                  onCancel()
+                }
+              }}
+            />
+            <div style={NAME_ROW}>
+              <span style={NAME_LABEL}>{t('nameLabel')}</span>
+              <input
+                style={NAME_INPUT}
+                value={name}
+                placeholder={t('clone.namePlaceholder')}
+                spellCheck={false}
+                autoComplete="off"
+                disabled={pending}
+                onChange={(event) => {
+                  setName(event.target.value)
+                  setNameTouched(true)
+                  setError(undefined)
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    if (isImeEnter(event)) return
+                    event.preventDefault()
+                    startClone()
+                  } else if (event.key === 'Escape') {
+                    event.preventDefault()
+                    onCancel()
+                  }
+                }}
+              />
+            </div>
+            {clone !== undefined && (
+              <div
+                style={PROGRESS_TRACK}
+                role="progressbar"
+                aria-valuenow={clone.percent ?? 0}
+                aria-valuemin={0}
+                aria-valuemax={100}
+              >
+                <div style={{ ...PROGRESS_BAR, width: `${Math.max(2, Math.min(100, clone.percent ?? 0))}%` }} />
+              </div>
+            )}
+            {status !== undefined && (
+              <div style={{ ...PREVIEW, fontFamily: 'inherit', color: status.color }} role={error === undefined ? 'status' : 'alert'}>
+                {status.text}
+              </div>
+            )}
+            <div style={ACTIONS}>
+              <button type="button" style={LINK} disabled={pending} onClick={() => { setMode('create'); setError(undefined) }}>
+                {t('clone.back')}
+              </button>
+              <span style={{ flex: '1 1 0' }} />
+              <button type="button" style={SECONDARY} disabled={working} onClick={onCancel}>
+                {t('cancel')}
+              </button>
+              <button type="button" style={PRIMARY} disabled={pending || repoUrl.trim() === ''} onClick={startClone}>
+                {clone !== undefined && clone.phase !== 'done' && clone.phase !== 'failed'
+                  ? t('clone.progress', { percent: clone.percent ?? 0 })
+                  : t('clone.start')}
+              </button>
+            </div>
+            <div style={FOOT}>{t('clone.foot')}</div>
+          </>
         ) : (
           <>
             <div style={SUBTITLE}>{root === undefined ? t('subtitle.unknown') : t('subtitle.empty')}</div>
@@ -691,6 +1000,19 @@ function QuickProjectFlow(props) {
             <div style={ACTIONS}>
               <button type="button" style={LINK} disabled={pending} onClick={choose}>
                 {t('browse')}
+              </button>
+              <button
+                type="button"
+                style={LINK}
+                disabled={pending}
+                onClick={() => {
+                  setMode('clone')
+                  setError(undefined)
+                  // Focus lands on the URL field on the next paint, once it exists.
+                  setTimeout(() => repoUrlRef.current?.focus(), 0)
+                }}
+              >
+                {t('clone.link')}
               </button>
               <span style={{ flex: '1 1 0' }} />
               <button type="button" style={SECONDARY} disabled={working} onClick={onCancel}>

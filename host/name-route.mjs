@@ -10,15 +10,14 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import { NAME_PATTERN, slugify } from './naming.mjs'
+import { readBody, sendJson } from './http.mjs'
 
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'quick-project-name'
 
 /** The model route and the HTTP surface are the only Host services read. */
 export const inject = ['webServer', 'llm', 'agentDefaultModel']
-
-/** Folder names this endpoint is willing to return: one safe path segment. */
-const SLUG = /^[a-z0-9][a-z0-9-]{0,39}$/
 
 /** One-shot instruction for the naming call. */
 const SYSTEM = [
@@ -33,39 +32,6 @@ const SYSTEM = [
 
 /** Hard stop on the model call. */
 const CALL_TIMEOUT_MS = 20_000
-
-/** Write one JSON response. A `handler` route owns the whole response lifecycle. */
-function sendJson(res, status, value) {
-  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
-  res.end(JSON.stringify(value))
-}
-
-/** Read the request body, bounded so a wrong client cannot grow it without limit. */
-async function readBody(req, limit = 16_384) {
-  const chunks = []
-  let size = 0
-  for await (const chunk of req) {
-    size += chunk.length
-    if (size > limit) throw new Error('body too large')
-    chunks.push(chunk)
-  }
-  return Buffer.concat(chunks).toString('utf8')
-}
-
-/**
- * Reduce one token to a candidate slug.
- * @param token - raw token from the model answer.
- * @returns a slug-shaped string, possibly empty.
- */
-function toSlug(token) {
-  return String(token)
-    .toLowerCase()
-    .replace(/[^a-z0-9-]+/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-|-$/g, '')
-    .slice(0, 40)
-    .replace(/-$/g, '')
-}
 
 /**
  * Keep only the name-shaped token of a model answer.
@@ -84,8 +50,8 @@ function pickSlug(raw) {
   const bare = text.match(/[A-Za-z0-9][A-Za-z0-9-]{0,39}/g) ?? []
   const scored = []
   for (const token of [...quoted, ...bare]) {
-    const slug = toSlug(token)
-    if (slug === '' || !SLUG.test(slug)) continue
+    const slug = slugify(token)
+    if (slug === '' || !NAME_PATTERN.test(slug)) continue
     const hyphens = (slug.match(/-/g) ?? []).length
     scored.push({ slug, score: hyphens * 100 + slug.length })
   }
@@ -98,7 +64,7 @@ function pickSlug(raw) {
  * Ask the default model for one project name.
  * @param ctx - context exposing the LLM runtime and the default selection.
  * @param description - the user's requirement text.
- * @returns a slug that matches {@link SLUG}.
+ * @returns a slug that matches {@link NAME_PATTERN}.
  * @throws {Error} when the route is missing, the call fails, or the answer holds no name.
  */
 async function suggestName(ctx, description) {
@@ -142,18 +108,13 @@ async function suggestName(ctx, description) {
   const answer = parts.join('')
   const slug = pickSlug(answer)
   if (slug !== '') return slug
-  // This deployment's default model often answers in Chinese. A short CJK name
-  // is a legal folder name and far more useful than failing, so take the first
-  // run of Han characters and strip the filler that says nothing about the
-  // project ("帮我做一个…").
-  const han = (answer.match(/[\u4e00-\u9fa5]+/g) ?? [])
-    .join('')
-    .replace(/^(?:帮我|帮忙|请|我|要|想|把|将|做|写|开发|实现|搞|弄|搭|建|一个|一套|一份|个|套|份|的)+/, '')
-    .slice(0, 12)
-    .replace(/[的了]$/, '')
-  if (han !== '') return han
+  // A model that answered in Chinese used to get its Han characters back as the
+  // folder name, which is the exact outcome the naming rule now forbids. There
+  // is nothing to salvage from such an answer — `slugify` of 「账单汇总」 is
+  // empty — so this reports the failure and the browser uses its own ASCII
+  // fallback.
   throw new Error([
-    'the model answer held no usable name',
+    'the model answer held no usable ascii name',
     `text=${JSON.stringify(answer.slice(0, 120))}`,
     `reasoning=${JSON.stringify(reasoning.join('').slice(0, 200))}`,
   ].join(' '))

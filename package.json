@@ -12,14 +12,19 @@
   },
   "files": [
     "index.mjs",
+    "host/naming.mjs",
+    "host/http.mjs",
     "host/name-route.mjs",
     "host/project-fs.mjs",
+    "host/clone-route.mjs",
     "host/routes.mjs",
     "client/client.js",
     "client/src/client.js",
     "scripts/build.mjs",
     "test/host.test.mjs",
     "test/project-fs.test.mjs",
+    "test/naming.test.mjs",
+    "test/clone-route.test.mjs",
     "cordis.patch.yml",
     "README.md",
     "docs/"
@@ -39,7 +44,7 @@
   },
   "scripts": {
     "build": "node scripts/build.mjs",
-    "test": "node --test test/host.test.mjs test/project-fs.test.mjs"
+    "test": "node --test test/host.test.mjs test/project-fs.test.mjs test/naming.test.mjs test/clone-route.test.mjs"
   },
   "dsh": {
     "bundle": {

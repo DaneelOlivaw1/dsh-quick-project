@@ -104,12 +104,19 @@ test('creates a project under the projects root, parents included, idempotently'
   assert.equal(existsSync(created.json.path), false)
 })
 
-test('create rejects a name that is not one path segment', async () => {
+test('create rejects a name that is not one legal path segment', async () => {
   const { ctx, registered } = fakeContext()
   apply(ctx)
   for (const name of ['', '   ', '.', '..', 'a/b', 'a\\b']) {
     const result = await call(registered.get('/quick-project/create'), { body: { name } })
     assert.equal(result.status, 400, `${JSON.stringify(name)} should be rejected`)
+  }
+  // The naming rule applies to creation too: a Chinese folder name must not be
+  // creatable even if a browser half somewhere still asked for one.
+  for (const name of ['账单汇总', '新建文件夹', 'UPPER', 'trailing-']) {
+    const result = await call(registered.get('/quick-project/create'), { body: { name } })
+    assert.equal(result.status, 400, `${JSON.stringify(name)} should be rejected`)
+    assert.equal(result.json.error, 'bad-name')
   }
 })
 

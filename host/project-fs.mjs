@@ -23,30 +23,14 @@
 import { mkdir, readdir, realpath, rm, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import { nameProblem } from './naming.mjs'
+import { readBody, sendJson } from './http.mjs'
 
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'quick-project-fs'
 
 /** The HTTP surface is the only Host service read. */
 export const inject = ['webServer']
-
-/** Write one JSON response. A `handler` route owns the whole response lifecycle. */
-function sendJson(res, status, value) {
-  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
-  res.end(JSON.stringify(value))
-}
-
-/** Read the request body, bounded. */
-async function readBody(req, limit = 4_096) {
-  const chunks = []
-  let size = 0
-  for await (const chunk of req) {
-    size += chunk.length
-    if (size > limit) throw new Error('body too large')
-    chunks.push(chunk)
-  }
-  return Buffer.concat(chunks).toString('utf8')
-}
 
 /** True when `child` is `parent` or sits below it, on either separator. */
 function within(child, parent) {
@@ -101,13 +85,24 @@ async function subdirectories(target) {
   return entries
 }
 
-/** Reject a name that is not a single path segment. */
+/**
+ * Reject a name that is not a legal project name.
+ *
+ * Stricter than "one path segment" on purpose: `create` used to accept any
+ * single segment, so 「新建文件夹」 was a legal project — which is the thing the
+ * naming rule exists to stop. The rule lives in `naming.mjs` so the browser
+ * half, this route and the clone route cannot disagree about it.
+ * @param name - the requested folder name.
+ * @returns a sentence explaining the problem, or undefined.
+ */
 function segmentProblem(name) {
-  if (typeof name !== 'string') return 'name is required'
-  if (name.trim() === '') return 'name is required'
-  if (name === '.' || name === '..') return 'name cannot be . or ..'
-  if (/[/\\]/.test(name)) return 'name must be a single path segment'
-  return undefined
+  const problem = nameProblem(name)
+  if (problem === undefined) return undefined
+  if (problem === 'empty') return 'name is required'
+  if (problem === 'dot') return 'name cannot be . or ..'
+  if (problem === 'separator') return 'name must be a single path segment'
+  if (problem === 'non-ascii') return 'name must be ascii: lowercase letters, digits and hyphens'
+  return 'name must be lowercase letters, digits and hyphens, at most 40 characters'
 }
 
 /**
@@ -200,7 +195,7 @@ export function mount(web) {
         sendJson(res, 400, { ok: false, error: 'bad-name', message: problem })
         return
       }
-      const target = join(projectsRoot(), body.name)
+      const target = join(projectsRoot(), String(body.name).trim())
       const refusal = outsideHome(target)
       if (refusal !== undefined) {
         sendJson(res, 409, { ok: false, error: 'refused', message: refusal })
