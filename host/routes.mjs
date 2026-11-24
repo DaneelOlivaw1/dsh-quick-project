@@ -8,11 +8,16 @@
  * on a duplicate route. The marker therefore lives on the server object itself,
  * not on the module, because the two callers import this file under different
  * URLs and so get different module instances.
+ *
+ * The sub-modules are imported *dynamically*, carrying this module's own `?v=`
+ * along. That is not a style choice. Node caches an ES module by resolved URL,
+ * and a query string on `routes.mjs?v=10` does **not** propagate into a static
+ * `import './clone-route.mjs'` — that specifier still resolves to the bare
+ * path and hits whatever the *first* load cached. A version bump would then
+ * swap the entry point while every route kept executing old code, which is a
+ * silent "my change did nothing" failure indistinguishable from a broken hot
+ * reload. Threading the tag through makes one bump mean one real reload.
  */
-
-import { mount as mountNameRoute } from './name-route.mjs'
-import { mount as mountProjectFs } from './project-fs.mjs'
-import { mount as mountClone } from './clone-route.mjs'
 
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'quick-project-routes'
@@ -22,6 +27,18 @@ export const inject = ['webServer', 'llm', 'agentDefaultModel']
 
 /** Key on the web server recording which routes are mounted. */
 const MOUNTED = Symbol.for('dsh-quick-project.routes-mounted')
+
+/**
+ * Import one sibling module under this module's own version tag.
+ * @param file - file name next to this module, e.g. `./clone-route.mjs`.
+ * @returns the imported module namespace.
+ */
+export function importSibling(file) {
+  const here = new URL(import.meta.url)
+  const tagged = new URL(file, here)
+  tagged.search = here.search
+  return import(tagged.href)
+}
 
 /**
  * Mount every route, replacing whatever was mounted before.
@@ -35,11 +52,30 @@ const MOUNTED = Symbol.for('dsh-quick-project.routes-mounted')
  */
 export function apply(ctx) {
   ctx.inject(['webServer', 'llm', 'agentDefaultModel'], (web) => {
-    // Each module replaces its own routes on mount, so calling all three is safe
-    // no matter how many times this runs.
-    mountNameRoute(web)
-    mountProjectFs(web)
-    mountClone(web)
-    web.webServer[MOUNTED] = true
+    // The imports are async, but registration must not be: an awaited callback
+    // returns before any route exists, and a request that arrives during that
+    // window finds nothing. The promise is kept so a failed load is reported by
+    // the loader rather than swallowed.
+    loadSiblings().then((modules) => {
+      try {
+        // Each module replaces its own routes on mount, so calling all three is
+        // safe no matter how many times this runs.
+        for (const module of modules) module.mount(web)
+        web.webServer[MOUNTED] = true
+      } catch (error) {
+        console.error('[quick-project] could not mount its routes:', error)
+      }
+    }).catch((error) => {
+      console.error('[quick-project] could not load its route modules:', error)
+    })
   })
+}
+
+/** Load the three route modules, each under this module's version tag. */
+function loadSiblings() {
+  return Promise.all([
+    importSibling('./name-route.mjs'),
+    importSibling('./project-fs.mjs'),
+    importSibling('./clone-route.mjs'),
+  ])
 }

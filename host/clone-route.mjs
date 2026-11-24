@@ -95,6 +95,12 @@ function pruneJobs(now = Date.now()) {
 export function readProgress(line) {
   const text = line.trim()
   if (text === '') return {}
+  // `remote:` lines are the *other* side of the transfer doing its own work —
+  // `remote: Compressing objects: 100%` means the server finished compressing,
+  // not that this clone is 100% done. Counting it would pin the bar at 100% for
+  // the whole download, which is exactly the "stuck bar" this plugin exists to
+  // avoid. They stay as raw reassurance text only.
+  if (/^remote:/i.test(text)) return { line: text, touchedAt: Date.now() }
   const patch = { line: text, touchedAt: Date.now() }
   // Name the phase the way git does, so the dialog can say what is happening in
   // the person's words rather than showing raw git output alone. The phase is
@@ -132,10 +138,16 @@ export function progressConsumer(job) {
     carry = /[\r\n]$/.test(carry) ? '' : (parts.pop() ?? '')
     for (const part of parts) {
       const patch = readProgress(part)
-      // Phase changes restart git's own counter (`Receiving objects` begins at
-      // 0% after `Compressing` reaches 100), so the bar is clamped to what it
-      // already showed: a progress bar that jumps backwards reads as a restart.
-      if (typeof patch.percent === 'number') patch.percent = Math.max(job.percent ?? 0, patch.percent)
+      // A phase change restarts git's own counter (`Receiving objects` begins at
+      // 0% after `Compressing` reached 100), so a naive max() over the whole
+      // stream would leave the bar at 100% while the download runs. The clamp is
+      // therefore per phase: inside one phase the number only grows, but a new
+      // phase starts counting from its own reading.
+      if (typeof patch.percent === 'number') {
+        patch.percent = patch.phase !== undefined && patch.phase !== job.phase
+          ? patch.percent
+          : Math.max(job.percent ?? 0, patch.percent)
+      }
       Object.assign(job, patch)
     }
   }

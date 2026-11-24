@@ -143,6 +143,33 @@ test('reads a phase and a percentage out of one git line', () => {
   assert.deepEqual(readProgress('   '), {})
 })
 
+test('ignores remote: lines, which report the other side finishing', () => {
+  // The bug this locks: `remote: Compressing objects: 100%` is the server's own
+  // work. Folding it into the bar pinned the clone at 100% for the whole
+  // download, so the progress bar froze at "done" while git was still fetching.
+  const job = { phase: 'starting', percent: 0, line: '' }
+  const consume = progressConsumer(job)
+  consume('remote: Compressing objects: 100% (30383/30383), done.\n')
+  assert.equal(job.percent, 0, 'the remote finishing is not this clone finishing')
+  consume('Receiving objects:   7% (1/425167)\r')
+  assert.equal(job.percent, 7, 'local progress must not be clamped by remote output')
+  assert.equal(job.phase, 'receiving')
+})
+
+test('restarts the count when git moves to a new phase', () => {
+  const job = { phase: 'starting', percent: 0, line: '' }
+  const consume = progressConsumer(job)
+  consume('Receiving objects:  46% (195578/425167)\r')
+  assert.equal(job.percent, 46)
+  // Resolving deltas genuinely begins near 0%: keeping the max across phases
+  // would leave the bar pinned at 46% while it works.
+  consume('Resolving deltas:   0% (0/388404)\r')
+  assert.equal(job.phase, 'resolving')
+  assert.equal(job.percent, 0)
+  consume('Resolving deltas:  88% (341795/388404)\r')
+  assert.equal(job.percent, 88)
+})
+
 test('follows a carriage-return progress stream to 100%', () => {
   // The real shape of a network clone: git overwrites one line with \r, and the
   // whole point of this plugin's progress is that the bar moves during the
@@ -151,16 +178,19 @@ test('follows a carriage-return progress stream to 100%', () => {
   const consume = progressConsumer(job)
   consume("Cloning into 'repo'...\n")
   assert.equal(job.phase, 'starting')
-  consume('remote: Enumerating objects: 13, done.        \n')
+  // A local `Enumerating objects` line is this side's own phase; the `remote:`
+  // one is the server's and deliberately does not move the bar.
+  consume('Enumerating objects: 13, done.\n')
   assert.equal(job.phase, 'enumerating')
   consume('Receiving objects:   7% (1/13)\rReceiving objects:  46% (6/13)\rReceiving objects:  92% (12/13)\r')
   assert.equal(job.phase, 'receiving')
   assert.equal(job.percent, 92)
-  // A later phase restarting at 0% must not drag the bar backwards.
+  // A later phase restarts git's own counter, and the bar follows it: pinning
+  // the max would freeze the bar while the new phase runs.
   consume('Resolving deltas:   0% (0/5)\r')
   assert.equal(job.phase, 'resolving')
-  assert.equal(job.percent, 92, 'the bar never goes backwards')
-  consume('Receiving objects: 100% (13/13), done.\n')
+  assert.equal(job.percent, 0)
+  consume('Resolving deltas: 100% (5/5), done.\n')
   assert.equal(job.percent, 100)
 })
 

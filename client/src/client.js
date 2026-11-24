@@ -68,13 +68,9 @@ const LABELS = {
     'error.home': '还没拿到宿主主目录，稍等一秒再试',
     'error.failed': '创建失败：{message}',
     foot: '回车创建 · Shift+回车换行 · Esc 取消',
-    'clone.link': '克隆 Git 仓库…',
-    'clone.back': '返回新建项目',
-    'clone.title': '克隆 Git 仓库',
-    'clone.subtitle': '粘贴仓库地址，克隆到 ~/project 并直接开始；需求写在下面，克隆完自动发出去',
     'clone.urlLabel': '仓库地址',
-    'clone.urlPlaceholder': 'https://github.com/owner/repo.git 或 git@github.com:owner/repo.git',
-    'clone.namePlaceholder': '留空则用仓库名',
+    'clone.urlPlaceholder': '可选：粘贴仓库地址就克隆它，留空就新建空文件夹',
+    'namePlaceholder.clone': '留空则用仓库名',
     'clone.start': '克隆并开始',
     'clone.starting': '正在启动克隆…',
     'clone.progress': '克隆中 · {percent}%',
@@ -125,13 +121,9 @@ const LABELS = {
     'error.home': 'The Host home directory is not available yet — try again in a second',
     'error.failed': 'Could not create it: {message}',
     foot: 'Enter to create · Shift+Enter for a new line · Esc to cancel',
-    'clone.link': 'Clone a Git repository…',
-    'clone.back': 'Back to new project',
-    'clone.title': 'Clone a Git repository',
-    'clone.subtitle': 'Paste the repository URL; it is cloned into ~/project and opened. Put what you want done below and it is sent once the clone finishes.',
     'clone.urlLabel': 'Repository',
-    'clone.urlPlaceholder': 'https://github.com/owner/repo.git or git@github.com:owner/repo.git',
-    'clone.namePlaceholder': 'Left blank, named after the repository',
+    'clone.urlPlaceholder': 'Optional: paste a repository URL to clone it; leave blank to create an empty folder',
+    'namePlaceholder.clone': 'Left blank, named after the repository',
     'clone.start': 'Clone and start',
     'clone.starting': 'Starting the clone…',
     'clone.progress': 'Cloning · {percent}%',
@@ -284,6 +276,29 @@ const PROGRESS_BAR = {
   borderRadius: '999px',
   transition: 'width 200ms linear',
 }
+
+/**
+ * Phases git reports without a percentage (`Counting objects`, `Enumerating`,
+ * the local half of `Compressing`). During those the bar has nothing honest to
+ * show, and a sliver frozen at 2% reads as a hang — so it sweeps instead, which
+ * says "working, amount unknown".
+ */
+const PROGRESS_INDETERMINATE = {
+  ...PROGRESS_BAR,
+  width: '35%',
+  opacity: 0.55,
+  animation: 'dsh-quick-project-sweep 1.2s ease-in-out infinite',
+}
+
+const PROGRESS_KEYFRAMES = `
+@keyframes dsh-quick-project-sweep {
+  0%   { margin-left: -35%; }
+  100% { margin-left: 100%; }
+}
+`
+
+/** Phases that carry no percentage of their own. */
+const COUNTING_PHASES = new Set(['starting', 'counting', 'enumerating', 'compressing'])
 
 const CRUMBS = {
   display: 'flex',
@@ -464,8 +479,6 @@ function QuickProjectFlow(props) {
   const [listingBusy, setListingBusy] = useState(false)
   /** The repository address in clone mode. */
   const [repoUrl, setRepoUrl] = useState('')
-  /** The requirement typed in clone mode; kept apart from `description` so switching modes cannot cross the two. */
-  const [cloneDescription, setCloneDescription] = useState('')
   /** The running clone's progress, as the Host reported it. */
   const [clone, setClone] = useState(undefined)
   const descriptionRef = useRef(null)
@@ -487,11 +500,13 @@ function QuickProjectFlow(props) {
    * should be visible before git runs, not after.
    */
   const cloneFolder = trimmedName !== '' ? trimmedName : nameFromRepoUrl(trimmedRepoUrl)
+  /** True when this submit will clone rather than create an empty folder. */
+  const cloningRepo = trimmedRepoUrl !== '' || clone !== undefined
+  /** The folder this submit targets: the clone's name when a URL is filled, else the typed name. */
+  const targetName = cloningRepo ? cloneFolder : trimmedName
   const preview = root === undefined
-    ? `~/project/${trimmedName}`
-    : mode === 'clone'
-      ? (cloneFolder === '' ? root : joinPath(root, cloneFolder))
-      : (trimmedName === '' ? root : joinPath(root, trimmedName))
+    ? `~/project/${targetName}`
+    : (targetName === '' ? root : joinPath(root, targetName))
   const pending = working || busy === true || naming
 
   // A fresh dialog each time it opens: no stale text, no stale complaint.
@@ -510,7 +525,6 @@ function QuickProjectFlow(props) {
     setListingError(undefined)
     setListingBusy(false)
     setRepoUrl('')
-    setCloneDescription('')
     setClone(undefined)
     // Ask the Host where projects live: the path separator is the Host's, not
     // the browser's, and only the Host knows it.
@@ -523,8 +537,10 @@ function QuickProjectFlow(props) {
 
   // Say “this one already exists” while typing rather than after Enter: the
   // answer changes what the button will do, so it belongs next to the field.
+  // The probe follows `targetName`, because which folder this submit will touch
+  // depends on whether a URL is filled.
   useEffect(() => {
-    if (!open || root === undefined || invalidName(trimmedName)) {
+    if (!open || root === undefined || invalidName(targetName)) {
       setExisted(false)
       return
     }
@@ -533,7 +549,7 @@ function QuickProjectFlow(props) {
       listProjects(root)
         .then((listing) => {
           if (cancelled) return
-          const hit = (listing?.entries ?? []).some((entry) => entry.name === trimmedName && entry.isDirectory !== false)
+          const hit = (listing?.entries ?? []).some((entry) => entry.name === targetName && entry.isDirectory !== false)
           setExisted(hit)
         })
         .catch(() => {
@@ -544,7 +560,7 @@ function QuickProjectFlow(props) {
       cancelled = true
       clearTimeout(probe)
     }
-  }, [open, root, trimmedName, listProjects])
+  }, [open, root, targetName, listProjects])
 
   /**
    * Adopt one directory and start the Session with the requirement in it.
@@ -577,44 +593,6 @@ function QuickProjectFlow(props) {
       await startSession(workspaceId, { prompt, clearPreviousDraft: true })
     }
   }, [trimmedDescription, onPicked, waitForWorkspace, startSession])
-
-  const submit = useCallback(async () => {
-    if (working || busy === true || naming) return
-    // Naming happens here and only here: typing the description must not start a
-    // model call, because a name that changes under your eyes reads as work you
-    // did not ask for yet.
-    let resolved = trimmedName
-    if (resolved === '' && trimmedDescription !== '') {
-      setNaming(true)
-      setNameNote(undefined)
-      try {
-        const suggested = await nameFromRequirement(trimmedDescription)
-        const fallback = typeof suggested !== 'string' || suggested === ''
-        resolved = fallback ? fallbackName(trimmedDescription) : suggested
-        setName(resolved)
-        setNameNote(fallback ? t('named.fallback') : t('named'))
-      } finally {
-        setNaming(false)
-      }
-    }
-    if (invalidName(resolved)) {
-      setError(nameErrorText(resolved, t))
-      return
-    }
-    setWorking(true)
-    setError(undefined)
-    try {
-      // `mkdir -p` semantics on the Host: an existing name is adopted rather
-      // than treated as an error, and the Host owns the path separator.
-      const target = await createProject(resolved)
-      await finishWith(target)
-    } catch (reason) {
-      AUTO_SEND.text = ''
-      setError(t('error.failed', { message: reason instanceof Error ? reason.message : String(reason) }))
-    } finally {
-      setWorking(false)
-    }
-  }, [working, busy, trimmedName, trimmedDescription, createProject, finishWith, nameFromRequirement, t])
 
   /**
    * Start a clone and follow it to the end.
@@ -676,7 +654,7 @@ function QuickProjectFlow(props) {
       setClone(status)
       if (status.phase === 'done') {
         try {
-          await finishWith(status.path, cloneDescription)
+          await finishWith(status.path, trimmedDescription)
         } catch (reason) {
           setError(t('clone.error', { message: reason instanceof Error ? reason.message : String(reason) }))
         } finally {
@@ -690,7 +668,53 @@ function QuickProjectFlow(props) {
         return
       }
     }
-  }, [working, busy, repoUrl, trimmedName, cloneDescription, finishWith, t])
+  }, [working, busy, repoUrl, trimmedName, trimmedDescription, finishWith, t])
+
+  const submit = useCallback(async () => {
+    if (working || busy === true || naming) return
+    // One dialog, two destinations. A URL means "bring this repository in", and
+    // the repository names the folder — asking the model for a name it would
+    // derive from a URL it cannot see is pointless. No URL means the old path:
+    // name it (from the description, if the field is blank) and create it.
+    if (trimmedRepoUrl !== '') {
+      await startClone()
+      return
+    }
+    // Naming happens here and only here: typing the description must not start a
+    // model call, because a name that changes under your eyes reads as work you
+    // did not ask for yet.
+    let resolved = trimmedName
+    if (resolved === '' && trimmedDescription !== '') {
+      setNaming(true)
+      setNameNote(undefined)
+      try {
+        const suggested = await nameFromRequirement(trimmedDescription)
+        const fallback = typeof suggested !== 'string' || suggested === ''
+        resolved = fallback ? fallbackName(trimmedDescription) : suggested
+        setName(resolved)
+        setNameNote(fallback ? t('named.fallback') : t('named'))
+      } finally {
+        setNaming(false)
+      }
+    }
+    if (invalidName(resolved)) {
+      setError(nameErrorText(resolved, t))
+      return
+    }
+    setWorking(true)
+    setError(undefined)
+    try {
+      // `mkdir -p` semantics on the Host: an existing name is adopted rather
+      // than treated as an error, and the Host owns the path separator.
+      const target = await createProject(resolved)
+      await finishWith(target)
+    } catch (reason) {
+      AUTO_SEND.text = ''
+      setError(t('error.failed', { message: reason instanceof Error ? reason.message : String(reason) }))
+    } finally {
+      setWorking(false)
+    }
+  }, [working, busy, trimmedName, trimmedDescription, trimmedRepoUrl, createProject, finishWith, nameFromRequirement, startClone, t])
 
   /** Read one directory into the browser pane. */
   const load = useCallback(async (path) => {
@@ -728,22 +752,34 @@ function QuickProjectFlow(props) {
   const status = error !== undefined
     ? { text: error, color: 'var(--dsw-alias-state-error-primary, #d1242f)' }
     : clone !== undefined && clone.phase !== 'done' && clone.phase !== 'failed'
-      ? { text: `${clonePhaseText} ${t('clone.progress', { percent: clone.percent ?? 0 })}${clone.line === '' || clone.line === undefined ? '' : ` · ${clone.line}`}`, color: 'var(--dsw-alias-label-secondary, rgba(0,0,0,.7))' }
+      // A phase with no percentage of its own shows only its name: "… · 0%"
+      // next to a sweeping bar reads as stuck at zero.
+      ? {
+          text: [
+            COUNTING_PHASES.has(clone.phase)
+              ? clonePhaseText
+              : `${clonePhaseText} ${t('clone.progress', { percent: clone.percent ?? 0 })}`,
+            clone.line === '' || clone.line === undefined ? '' : clone.line,
+          ].filter((part) => part !== '').join(' · '),
+          color: 'var(--dsw-alias-label-secondary, rgba(0,0,0,.7))',
+        }
       : busy === true
         ? { text: t('opening'), color: undefined }
         : working
-          ? { text: mode === 'clone' ? t('clone.starting') : t('creating'), color: undefined }
+          ? { text: cloningRepo ? t('clone.starting') : t('creating'), color: undefined }
           : naming
             ? { text: t('naming'), color: undefined }
-            : existed && mode !== 'clone'
-              ? { text: t('exists'), color: 'var(--dsw-alias-label-secondary, rgba(0,0,0,.7))' }
+            : existed
+              // A clone into a non-empty directory is refused, not adopted, so the
+              // "it will be opened" sentence would be a lie here.
+              ? { text: cloningRepo ? t('clone.exists', { name: targetName }) : t('exists'), color: 'var(--dsw-alias-label-secondary, rgba(0,0,0,.7))' }
               : nameNote !== undefined
                 ? { text: nameNote, color: 'var(--dsw-alias-label-tertiary, rgba(0,0,0,.55))' }
-                : trimmedName === '' && trimmedDescription !== '' && mode !== 'clone'
+                : trimmedName === '' && trimmedDescription !== '' && !cloningRepo
                   ? { text: t('name.will'), color: 'var(--dsw-alias-label-tertiary, rgba(0,0,0,.55))' }
-                  : { text: mode === 'clone' && cloneFolder === '' ? t('clone.noUrl') : preview, color: 'var(--dsw-alias-label-secondary, rgba(0,0,0,.7))' }
+                  : { text: preview, color: 'var(--dsw-alias-label-secondary, rgba(0,0,0,.7))' }
 
-  const dialogTitle = mode === 'browse' ? t('browse.title') : mode === 'clone' ? t('clone.title') : t('title')
+  const dialogTitle = mode === 'browse' ? t('browse.title') : t('title')
 
   return (
     <div
@@ -829,116 +865,6 @@ function QuickProjectFlow(props) {
               </button>
             </div>
           </>
-        ) : mode === 'clone' ? (
-          <>
-            <div style={SUBTITLE}>{t('clone.subtitle')}</div>
-            <div style={NAME_ROW}>
-              <span style={NAME_LABEL}>{t('clone.urlLabel')}</span>
-              <input
-                ref={repoUrlRef}
-                style={NAME_INPUT}
-                value={repoUrl}
-                placeholder={t('clone.urlPlaceholder')}
-                spellCheck={false}
-                autoComplete="off"
-                disabled={pending}
-                onChange={(event) => {
-                  setRepoUrl(event.target.value)
-                  setError(undefined)
-                }}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter') {
-                    if (isImeEnter(event)) return
-                    event.preventDefault()
-                    startClone()
-                  } else if (event.key === 'Escape') {
-                    event.preventDefault()
-                    onCancel()
-                  }
-                }}
-              />
-            </div>
-            <textarea
-              ref={descriptionRef}
-              style={{ ...FIELD, minHeight: '64px' }}
-              rows={3}
-              value={cloneDescription}
-              placeholder={t('clone.requirement')}
-              spellCheck={false}
-              disabled={pending}
-              onChange={(event) => {
-                setCloneDescription(event.target.value)
-                setError(undefined)
-              }}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter' && !event.shiftKey) {
-                  if (isImeEnter(event)) return
-                  event.preventDefault()
-                  startClone()
-                } else if (event.key === 'Escape') {
-                  event.preventDefault()
-                  onCancel()
-                }
-              }}
-            />
-            <div style={NAME_ROW}>
-              <span style={NAME_LABEL}>{t('nameLabel')}</span>
-              <input
-                style={NAME_INPUT}
-                value={name}
-                placeholder={t('clone.namePlaceholder')}
-                spellCheck={false}
-                autoComplete="off"
-                disabled={pending}
-                onChange={(event) => {
-                  setName(event.target.value)
-                  setNameTouched(true)
-                  setError(undefined)
-                }}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter') {
-                    if (isImeEnter(event)) return
-                    event.preventDefault()
-                    startClone()
-                  } else if (event.key === 'Escape') {
-                    event.preventDefault()
-                    onCancel()
-                  }
-                }}
-              />
-            </div>
-            {clone !== undefined && (
-              <div
-                style={PROGRESS_TRACK}
-                role="progressbar"
-                aria-valuenow={clone.percent ?? 0}
-                aria-valuemin={0}
-                aria-valuemax={100}
-              >
-                <div style={{ ...PROGRESS_BAR, width: `${Math.max(2, Math.min(100, clone.percent ?? 0))}%` }} />
-              </div>
-            )}
-            {status !== undefined && (
-              <div style={{ ...PREVIEW, fontFamily: 'inherit', color: status.color }} role={error === undefined ? 'status' : 'alert'}>
-                {status.text}
-              </div>
-            )}
-            <div style={ACTIONS}>
-              <button type="button" style={LINK} disabled={pending} onClick={() => { setMode('create'); setError(undefined) }}>
-                {t('clone.back')}
-              </button>
-              <span style={{ flex: '1 1 0' }} />
-              <button type="button" style={SECONDARY} disabled={working} onClick={onCancel}>
-                {t('cancel')}
-              </button>
-              <button type="button" style={PRIMARY} disabled={pending || repoUrl.trim() === ''} onClick={startClone}>
-                {clone !== undefined && clone.phase !== 'done' && clone.phase !== 'failed'
-                  ? t('clone.progress', { percent: clone.percent ?? 0 })
-                  : t('clone.start')}
-              </button>
-            </div>
-            <div style={FOOT}>{t('clone.foot')}</div>
-          </>
         ) : (
           <>
             <div style={SUBTITLE}>{root === undefined ? t('subtitle.unknown') : t('subtitle.empty')}</div>
@@ -966,11 +892,37 @@ function QuickProjectFlow(props) {
               }}
             />
             <div style={NAME_ROW}>
+              <span style={NAME_LABEL}>{t('clone.urlLabel')}</span>
+              <input
+                ref={repoUrlRef}
+                style={NAME_INPUT}
+                value={repoUrl}
+                placeholder={t('clone.urlPlaceholder')}
+                spellCheck={false}
+                autoComplete="off"
+                disabled={pending}
+                onChange={(event) => {
+                  setRepoUrl(event.target.value)
+                  setError(undefined)
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    if (isImeEnter(event)) return
+                    event.preventDefault()
+                    submit()
+                  } else if (event.key === 'Escape') {
+                    event.preventDefault()
+                    onCancel()
+                  }
+                }}
+              />
+            </div>
+            <div style={NAME_ROW}>
               <span style={NAME_LABEL}>{t('nameLabel')}</span>
               <input
                 style={NAME_INPUT}
                 value={name}
-                placeholder={t('namePlaceholder')}
+                placeholder={t(cloningRepo ? 'namePlaceholder.clone' : 'namePlaceholder')}
                 spellCheck={false}
                 autoComplete="off"
                 disabled={pending}
@@ -992,6 +944,32 @@ function QuickProjectFlow(props) {
                 }}
               />
             </div>
+            {clone !== undefined && (
+              <>
+                <style>{PROGRESS_KEYFRAMES}</style>
+                {COUNTING_PHASES.has(clone.phase) ? (
+                  <div
+                    style={PROGRESS_TRACK}
+                    role="progressbar"
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-label={clonePhaseText}
+                  >
+                    <div style={PROGRESS_INDETERMINATE} />
+                  </div>
+                ) : (
+                  <div
+                    style={PROGRESS_TRACK}
+                    role="progressbar"
+                    aria-valuenow={clone.percent ?? 0}
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                  >
+                    <div style={{ ...PROGRESS_BAR, width: `${Math.max(2, Math.min(100, clone.percent ?? 0))}%` }} />
+                  </div>
+                )}
+              </>
+            )}
             {status !== undefined && (
               <div style={{ ...PREVIEW, fontFamily: 'inherit', color: status.color }} role={error === undefined ? 'status' : 'alert'}>
                 {status.text}
@@ -1001,28 +979,26 @@ function QuickProjectFlow(props) {
               <button type="button" style={LINK} disabled={pending} onClick={choose}>
                 {t('browse')}
               </button>
-              <button
-                type="button"
-                style={LINK}
-                disabled={pending}
-                onClick={() => {
-                  setMode('clone')
-                  setError(undefined)
-                  // Focus lands on the URL field on the next paint, once it exists.
-                  setTimeout(() => repoUrlRef.current?.focus(), 0)
-                }}
-              >
-                {t('clone.link')}
-              </button>
               <span style={{ flex: '1 1 0' }} />
               <button type="button" style={SECONDARY} disabled={working} onClick={onCancel}>
                 {t('cancel')}
               </button>
-              <button type="button" style={PRIMARY} disabled={pending || (trimmedName === '' && trimmedDescription === '')} onClick={submit}>
-                {busy === true ? t('opening') : working ? t('creating') : t('create')}
+              {/* One button, two verbs: a filled URL turns it into the clone action,
+                  which is the whole point of keeping the URL in this same card. */}
+              <button
+                type="button"
+                style={PRIMARY}
+                disabled={pending || (cloningRepo ? cloneFolder === '' : (trimmedName === '' && trimmedDescription === ''))}
+                onClick={submit}
+              >
+                {busy === true
+                  ? t('opening')
+                  : working
+                    ? (cloningRepo ? t('clone.starting') : t('creating'))
+                    : (cloningRepo ? t('clone.start') : t('create'))}
               </button>
             </div>
-            <div style={FOOT}>{t('foot')}</div>
+            <div style={FOOT}>{cloningRepo ? t('clone.foot') : t('foot')}</div>
           </>
         )}
       </div>
